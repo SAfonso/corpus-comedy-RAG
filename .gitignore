@@ -11,8 +11,10 @@ graphify-out/
 # === Secretos / entorno ===
 .env
 .env.*
+!.env.example
 *.pem
 *.key
+secrets/
 
 # === Config local de Claude Code (personal) ===
 .claude/settings.local.json
