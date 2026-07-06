@@ -32,7 +32,7 @@ flowchart LR
         WX["WhisperX ✱<br/>vídeo → .txt"]
         DM["DriveMonitor"]
         TG["TelegramBot"]
-        MR["marcar_remates<br/>color → [REMATE]/[CHISTOIDE]"]
+        MR["marcar_remates<br/>color → REMATE · CHISTOIDE"]
         HL["HistLoader"]
     end
 
