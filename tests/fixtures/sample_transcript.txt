@@ -1,0 +1,8 @@
+[0.19s] SPEAKER_00: Hola, bienvenidas y bienvenidos a este curso.
+[7.42s] SPEAKER_00: Bueno, yo soy Denis o Deni, como queráis, y soy cómico.
+[12.10s] SPEAKER_00: O sea, llevo desde 2015 haciendo stand-up comedy, ¿vale?
+[18.33s] SPEAKER_00: Y hoy vamos a hablar de la regla de tres.
+[22.54s] SPEAKER_00: La regla de tres es, básicamente, o sea, una técnica donde presentas dos elementos que siguen un patrón y el tercero rompe las expectativas.
+[35.71s] SPEAKER_00: Por ejemplo, imagina que dices: "Me gustan los perros, los gatos... y los impuestos."
+[44.20s] SPEAKER_00: ¿Vale? El tercero es el remate. Eso es la regla de tres.
+[50.88s] SPEAKER_00: Bueno, pues vamos a ver cómo se construye esto, ¿no?

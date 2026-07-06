@@ -1,0 +1,41 @@
+# === Corpus data (copyright / privado / pesado) — NUNCA en git ===
+# Se ignora todo el contenido de data/ pero se conserva el esqueleto de carpetas
+# (.gitkeep) para que la estructura exista tras un clone.
+data/**
+!data/**/
+!data/**/.gitkeep
+
+# === Salidas de herramientas ===
+graphify-out/
+
+# === Secretos / entorno ===
+.env
+.env.*
+*.pem
+*.key
+
+# === Config local de Claude Code (personal) ===
+.claude/settings.local.json
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# === SO / editores ===
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
