@@ -15,63 +15,9 @@
 Flujo de datos de izquierda a derecha: cada fuente entra por su ingesta, pasa por su
 procesado y aterriza en el almacén correspondiente, que alimenta el RAG.
 
-```mermaid
-flowchart LR
-    %% ---------- Fuentes ----------
-    subgraph S["📥 Fuentes"]
-        direction TB
-        V["🎬 Vídeos<br/>(Drive)"]
-        L["📚 Libros<br/>PDF · EPUB · DOCX"]
-        T["💬 Telegram<br/>chistes propios"]
-        H["📝 Docs históricos<br/>.docx · remate en rojo"]
-    end
-
-    %% ---------- Ingesta ----------
-    subgraph I["⚙️ Ingesta"]
-        direction TB
-        WX["WhisperX ✱<br/>vídeo → .txt"]
-        DM["DriveMonitor"]
-        TG["TelegramBot"]
-        MR["marcar_remates<br/>color → REMATE · CHISTOIDE"]
-        HL["HistLoader"]
-    end
-
-    %% ---------- Procesado ----------
-    subgraph P["🧪 Procesado"]
-        direction TB
-        PA["<b>Teoría</b> (determinista, coste 0)<br/>Parser → Subtipo → Cleaner →<br/>Idioma → Calidad → Formato"]
-        PB["<b>Chistes</b><br/>Bronze → Silver (LLM) →<br/>Reconciliación"]
-    end
-
-    %% ---------- Almacén ----------
-    subgraph ST["🗄️ Almacén"]
-        direction TB
-        FS["/data/processed/v{N}/<br/>teoría · inmutable"]
-        DB[("Supabase<br/>Postgres + pgvector")]
-    end
-
-    R["🤖 Comedy RAG<br/>retrieval por tipo_fuente"]
-
-    V --> WX --> DM
-    L --> DM
-    DM --> PA --> FS
-    FS -. ingesta .-> DB
-    T --> TG --> PB
-    H --> MR --> HL --> PB
-    PB --> DB
-    DB --> R
-
-    classDef src   fill:#e3f2fd,stroke:#1565c0,color:#0d47a1;
-    classDef ing   fill:#d1e9fc,stroke:#1565c0,color:#0d47a1;
-    classDef proc  fill:#bbdefb,stroke:#1565c0,color:#0d47a1;
-    classDef store fill:#1565c0,stroke:#0d47a1,color:#ffffff;
-    classDef rag   fill:#0d47a1,stroke:#0d47a1,color:#ffffff;
-    class V,L,T,H src;
-    class WX,DM,TG,MR,HL ing;
-    class PA,PB proc;
-    class FS,DB store;
-    class R rag;
-```
+<p align="center">
+  <img src="docs/assets/architecture.svg" alt="Arquitectura del Comedy Corpus Pipeline: Fuentes (vídeos, libros, Telegram, docs con remate en rojo) → Ingesta → Procesado → Almacén (ficheros v{N} y Supabase/pgvector) → Comedy RAG" width="100%">
+</p>
 
 > ✱ **WhisperX** (transcripción vídeo→texto) es un paso previo de captación que corre
 > en Google Colab con GPU, fuera del pipeline determinista. Ver

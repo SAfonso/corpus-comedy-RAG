@@ -1,0 +1,143 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 470" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="ah" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0 L8 3 L0 6 Z" fill="#5b8bd0"/>
+    </marker>
+  </defs>
+
+  <!-- Card background (light, se ve bien en modo claro y oscuro de GitHub) -->
+  <rect x="8" y="8" width="1044" height="454" rx="16" fill="#ffffff" stroke="#cfe0f5" stroke-width="2"/>
+
+  <!-- Título -->
+  <text x="530" y="44" text-anchor="middle" font-size="21" font-weight="700" fill="#0d47a1">Comedy Corpus Pipeline — Arquitectura</text>
+
+  <!-- Separadores de etapa (líneas discontinuas) -->
+  <g stroke="#b9d3f0" stroke-width="1.5" stroke-dasharray="4 5">
+    <line x1="225" y1="72" x2="225" y2="398"/>
+    <line x1="445" y1="72" x2="445" y2="398"/>
+    <line x1="665" y1="72" x2="665" y2="398"/>
+    <line x1="875" y1="72" x2="875" y2="398"/>
+  </g>
+
+  <!-- ===================== FLECHAS ===================== -->
+  <g fill="none" stroke="#5b8bd0" stroke-width="2" marker-end="url(#ah)">
+    <!-- fuentes -> embudo (fan-in) -->
+    <line x1="145" y1="100" x2="300" y2="220"/>
+    <line x1="145" y1="175" x2="300" y2="222"/>
+    <line x1="145" y1="250" x2="300" y2="228"/>
+    <line x1="145" y1="325" x2="300" y2="232"/>
+    <!-- embudo -> engranajes -->
+    <line x1="372" y1="225" x2="522" y2="225"/>
+    <!-- engranajes -> almacén (teoría a ficheros, chistes a BD) -->
+    <line x1="592" y1="214" x2="748" y2="158"/>
+    <line x1="592" y1="236" x2="748" y2="300"/>
+    <!-- BD -> RAG -->
+    <line x1="806" y1="300" x2="946" y2="235"/>
+  </g>
+  <!-- ficheros v{N} -> Supabase (ingesta) -->
+  <g fill="none" stroke="#8aa9d6" stroke-width="2" stroke-dasharray="4 4" marker-end="url(#ah)">
+    <line x1="775" y1="186" x2="775" y2="268"/>
+  </g>
+  <text x="784" y="232" font-size="10" fill="#8aa9d6">ingesta</text>
+
+  <!-- ===================== ICONOS: FUENTES ===================== -->
+  <!-- Vídeos -->
+  <g transform="translate(115,100)">
+    <rect x="-26" y="-18" width="52" height="36" rx="6" fill="#e3f2fd" stroke="#1565c0" stroke-width="2.5"/>
+    <path d="M -6 -9 L 12 0 L -6 9 Z" fill="#1565c0"/>
+  </g>
+  <text x="115" y="138" text-anchor="middle" font-size="11.5" fill="#3f6aa8">Vídeos</text>
+
+  <!-- Libros -->
+  <g transform="translate(115,175)">
+    <rect x="-22" y="-16" width="44" height="32" rx="3" fill="#e3f2fd" stroke="#1565c0" stroke-width="2.5"/>
+    <line x1="0" y1="-16" x2="0" y2="16" stroke="#1565c0" stroke-width="2.5"/>
+    <g stroke="#1565c0" stroke-width="2">
+      <line x1="-15" y1="-6" x2="-6" y2="-6"/><line x1="-15" y1="2" x2="-6" y2="2"/>
+      <line x1="6" y1="-6" x2="15" y2="-6"/><line x1="6" y1="2" x2="15" y2="2"/>
+    </g>
+  </g>
+  <text x="115" y="213" text-anchor="middle" font-size="11.5" fill="#3f6aa8">Libros</text>
+
+  <!-- Telegram / chat -->
+  <g transform="translate(115,250)">
+    <path d="M -22 -16 H 22 a5 5 0 0 1 5 5 V 5 a5 5 0 0 1 -5 5 H -8 L -18 20 V 15 H -22 a5 5 0 0 1 -5 -5 V -11 a5 5 0 0 1 5 -5 Z" fill="#e3f2fd" stroke="#1565c0" stroke-width="2.5" stroke-linejoin="round"/>
+    <path d="M -14 -3 L 15 -9 L 2 8 Z" fill="#1565c0"/>
+  </g>
+  <text x="115" y="288" text-anchor="middle" font-size="11.5" fill="#3f6aa8">Telegram</text>
+
+  <!-- Documento con remate en rojo -->
+  <g transform="translate(115,325)">
+    <path d="M -17 -21 H 7 L 17 -11 V 21 H -17 Z" fill="#ffffff" stroke="#1565c0" stroke-width="2.5" stroke-linejoin="round"/>
+    <path d="M 7 -21 V -11 H 17" fill="none" stroke="#1565c0" stroke-width="2"/>
+    <line x1="-11" y1="-3" x2="11" y2="-3" stroke="#1565c0" stroke-width="2"/>
+    <line x1="-11" y1="5" x2="11" y2="5" stroke="#e53935" stroke-width="3"/>
+    <line x1="-11" y1="13" x2="4" y2="13" stroke="#1565c0" stroke-width="2"/>
+  </g>
+  <text x="115" y="363" text-anchor="middle" font-size="11.5" fill="#3f6aa8">Docs (rojo)</text>
+
+  <!-- ===================== ICONO: INGESTA (embudo) ===================== -->
+  <g transform="translate(335,225)">
+    <path d="M -24 -18 H 24 L 7 6 V 22 L -7 28 V 6 Z" fill="#e3f2fd" stroke="#1565c0" stroke-width="2.5" stroke-linejoin="round"/>
+    <g stroke="#1565c0" stroke-width="2.5" stroke-linecap="round">
+      <line x1="-14" y1="-27" x2="-14" y2="-22"/><line x1="0" y1="-29" x2="0" y2="-22"/><line x1="14" y1="-27" x2="14" y2="-22"/>
+    </g>
+  </g>
+
+  <!-- ===================== ICONO: PROCESADO (engranaje + chispa LLM) ===================== -->
+  <g transform="translate(555,225)">
+    <g fill="#e3f2fd" stroke="#1565c0" stroke-width="2">
+      <rect x="-4.5" y="-24" width="9" height="10" rx="2"/>
+      <rect x="-4.5" y="-24" width="9" height="10" rx="2" transform="rotate(45)"/>
+      <rect x="-4.5" y="-24" width="9" height="10" rx="2" transform="rotate(90)"/>
+      <rect x="-4.5" y="-24" width="9" height="10" rx="2" transform="rotate(135)"/>
+      <rect x="-4.5" y="-24" width="9" height="10" rx="2" transform="rotate(180)"/>
+      <rect x="-4.5" y="-24" width="9" height="10" rx="2" transform="rotate(225)"/>
+      <rect x="-4.5" y="-24" width="9" height="10" rx="2" transform="rotate(270)"/>
+      <rect x="-4.5" y="-24" width="9" height="10" rx="2" transform="rotate(315)"/>
+    </g>
+    <circle r="16" fill="#e3f2fd" stroke="#1565c0" stroke-width="2.5"/>
+    <circle r="6.5" fill="#ffffff" stroke="#1565c0" stroke-width="2.5"/>
+    <!-- chispa = LLM del Silver -->
+    <path d="M 22 -20 L 25 -13 L 32 -10 L 25 -7 L 22 0 L 19 -7 L 12 -10 L 19 -13 Z" fill="#1565c0"/>
+  </g>
+
+  <!-- ===================== ICONO: ALMACÉN — ficheros v{N} ===================== -->
+  <g transform="translate(775,150)">
+    <rect x="-11" y="-20" width="30" height="42" rx="4" fill="#ffffff" stroke="#1565c0" stroke-width="2.5"/>
+    <rect x="-18" y="-14" width="30" height="42" rx="4" fill="#e3f2fd" stroke="#1565c0" stroke-width="2.5"/>
+    <g stroke="#1565c0" stroke-width="2">
+      <line x1="-12" y1="-3" x2="6" y2="-3"/><line x1="-12" y1="5" x2="6" y2="5"/><line x1="-12" y1="13" x2="6" y2="13"/>
+    </g>
+  </g>
+  <text x="775" y="192" text-anchor="middle" font-size="11" fill="#3f6aa8">teoría · v{N}</text>
+
+  <!-- ===================== ICONO: ALMACÉN — base de datos (Supabase) ===================== -->
+  <g transform="translate(775,305)">
+    <path d="M -18 -15 v30 a18 6 0 0 0 36 0 v-30" fill="#1565c0" stroke="#0d47a1" stroke-width="2.5"/>
+    <ellipse cx="0" cy="-15" rx="18" ry="6" fill="#1565c0" stroke="#0d47a1" stroke-width="2.5"/>
+    <path d="M -18 -2 a18 6 0 0 0 36 0" fill="none" stroke="#ffffff" stroke-width="2" opacity="0.7"/>
+    <path d="M -18 8 a18 6 0 0 0 36 0" fill="none" stroke="#ffffff" stroke-width="2" opacity="0.7"/>
+  </g>
+  <text x="775" y="345" text-anchor="middle" font-size="11" fill="#3f6aa8">Supabase · pgvector</text>
+
+  <!-- ===================== ICONO: RAG (robot) ===================== -->
+  <g transform="translate(975,225)">
+    <line x1="0" y1="-14" x2="0" y2="-24" stroke="#0d47a1" stroke-width="2.5"/>
+    <circle cx="0" cy="-26" r="3.5" fill="#1565c0" stroke="#0d47a1" stroke-width="2"/>
+    <rect x="-22" y="-14" width="44" height="34" rx="9" fill="#1565c0" stroke="#0d47a1" stroke-width="2.5"/>
+    <rect x="-28" y="-4" width="6" height="14" rx="3" fill="#1565c0" stroke="#0d47a1" stroke-width="2"/>
+    <rect x="22" y="-4" width="6" height="14" rx="3" fill="#1565c0" stroke="#0d47a1" stroke-width="2"/>
+    <circle cx="-8" cy="0" r="4.2" fill="#ffffff"/><circle cx="8" cy="0" r="4.2" fill="#ffffff"/>
+    <rect x="-9" y="9" width="18" height="4" rx="2" fill="#ffffff"/>
+  </g>
+
+  <!-- ===================== ETIQUETAS DE ETAPA ===================== -->
+  <g text-anchor="middle" font-size="15" font-weight="700" fill="#0d47a1">
+    <text x="115" y="428">Fuentes</text>
+    <text x="335" y="428">Ingesta</text>
+    <text x="555" y="428">Procesado</text>
+    <text x="775" y="428">Almacén</text>
+    <text x="975" y="428">Comedy RAG</text>
+  </g>
+</svg>
