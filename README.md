@@ -6,7 +6,8 @@
 
 **Estado:** Fase 0 — spec aprobada, estructura creada, pre-implementación.
 **Metodología:** SDD estricto (spec → tests con fixtures reales → implementación).
-**Fuente de verdad:** [`docs/specs/comedy-corpus-pipeline.md`](docs/specs/comedy-corpus-pipeline.md).
+**Fuente de verdad:** [`docs/specs/00-overview.md`](docs/specs/00-overview.md) — la spec
+está partida por módulo y colocada junto al código que gobierna (ver tabla abajo).
 
 ---
 
@@ -30,8 +31,8 @@ procesado y aterriza en el almacén correspondiente, que alimenta el RAG.
 | Flujo | Módulo | Origen | Naturaleza | Destino |
 |-------|--------|--------|------------|---------|
 | **A — Teoría** | `src/theory/` | Libros/cursos desde Drive | Batch, **determinista**, coste 0 | Ficheros `/data/processed/v{N}/` |
-| **B — Chistes propios** | `src/jokes/` | Telegram (tiempo real) | Bronze → Silver (LLM) | Supabase |
-| **C — Chistes históricos** | `src/jokes/historico/` | Textos propios ya escritos | Batch retroactivo | Supabase |
+| **B — Chistes propios** | `src/jokes/telegram/` (+ `src/jokes/` compartido) | Telegram (tiempo real) | Bronze → Silver (LLM) | Supabase |
+| **C — Chistes históricos** | `src/jokes/historico/` (+ `src/jokes/` compartido) | Textos propios ya escritos | Batch retroactivo | Supabase |
 
 **`tipo_fuente`** (enum cerrado): `teoria · transcripcion_curso · propio · propio_historico`
 - `externo*` = `{teoria, transcripcion_curso}` → limpieza agresiva, ficheros `v{N}`.
@@ -52,14 +53,20 @@ procesado y aterriza en el almacén correspondiente, que alimenta el RAG.
 
 ```
 src/
-├── utils/       # COMPARTIDO: language_detector, quality_scorer, llm/ (cliente + embeddings)
-├── theory/      # Flujo A: drive_monitor, parsers/, cleaners/, detectors/, normalizers/, pipeline.py
-└── jokes/       # Flujos B/C: telegram_bot, silver, reconciliacion, supabase_store, historico/
+├── utils/            # COMPARTIDO: language_detector, quality_scorer, llm/ — SPEC.md
+├── theory/           # Flujo A: drive_monitor, parsers/, cleaners/, normalizers/, pipeline.py — SPEC.md
+└── jokes/            # Contrato compartido B/C: silver, reconciliacion, supabase_store — SPEC.md
+    ├── telegram/       # Flujo B: telegram_bot — SPEC.md
+    └── historico/      # Flujo C: loader, segmentador — SPEC.md
 scripts/         # run_pipeline · run_historico · marcar_remates · validate_corpus · stats_report
-docs/            # specs/ (fuente de verdad), reference/, CORPUS_INVENTORY.md
+docs/            # specs/ (overview + política LLM), reference/, CORPUS_INVENTORY.md
 tests/           # unit/ · integration/ · fixtures/ (reales, nunca inventados)
 data/            # corpus (NO versionado): raw/ (sagrado) · processed/ · state/
 ```
+
+Cada carpeta con lógica propia trae su `SPEC.md` — no hace falta leer toda la spec
+para tocar un módulo. Directriz completa en
+[`docs/specs/00-overview.md`](docs/specs/00-overview.md).
 
 **Regla de dependencias:** `theory/` y `jokes/` **no** se importan entre sí. Lo común va a `utils/`.
 
@@ -98,7 +105,16 @@ python scripts/validate_corpus.py   # antes de cada commit
 
 ## Documentos
 
-- [Especificación completa (v2 multi-fuente)](docs/specs/comedy-corpus-pipeline.md) — **fuente de verdad**
+**Specs** (empezar por overview; cada módulo trae el suyo, ver directriz de lectura):
+- [Overview + directriz de lectura](docs/specs/00-overview.md) — **punto de entrada**
+- [Política LLM, coste y copyright (P16)](docs/specs/llm-policy.md)
+- [`src/theory/SPEC.md`](src/theory/SPEC.md) — Flujo A (Teoría)
+- [`src/jokes/SPEC.md`](src/jokes/SPEC.md) — contrato compartido B/C (Silver, Reconciliación, Taxonomías)
+- [`src/jokes/telegram/SPEC.md`](src/jokes/telegram/SPEC.md) — Flujo B (Telegram)
+- [`src/jokes/historico/SPEC.md`](src/jokes/historico/SPEC.md) — Flujo C (Histórico)
+- [`src/utils/SPEC.md`](src/utils/SPEC.md) — código compartido
+
+**Otros:**
 - [Roadmap de Fase 0](ROADMAP_DATA_PIPELINE.md)
 - [Inventario del corpus](docs/CORPUS_INVENTORY.md)
 - [Guía operativa para Claude Code](CLAUDE.md)

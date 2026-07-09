@@ -3,7 +3,7 @@
 > **Objetivo único:** transformar fuentes heterogéneas y sucias en un corpus limpio,
 > normalizado y versionado que el RAG pueda consumir sin fricción.
 > **Versión:** 2.0 (multi-fuente) | **Estado:** Fase 0 completada · spec aprobada
-> **Spec:** `/docs/specs/comedy-corpus-pipeline.md` (fuente de verdad)
+> **Spec:** `/docs/specs/00-overview.md` (punto de entrada; partida por módulo dentro de `src/`)
 
 ---
 
@@ -18,8 +18,8 @@ Drive). Tras Fase 0 surgieron dos fuentes nuevas, ya incorporadas a la spec:
 
 Los une el contrato `tipo_fuente` (`teoria | transcripcion_curso | propio |
 propio_historico`) y un índice pgvector compartido. Detalle completo y decisiones
-(P1–P14) en **`/docs/specs/comedy-corpus-pipeline.md`**. La sección de interrogatorio
-de abajo se conserva como registro histórico de Fase 0.
+(P1–P16) en **`/docs/specs/00-overview.md`** y los `SPEC.md` de cada módulo. La
+sección de interrogatorio de abajo se conserva como registro histórico de Fase 0.
 
 ---
 
@@ -290,7 +290,9 @@ comedy-corpus-pipeline/
 │
 ├── docs/
 │   ├── specs/
-│   │   └── comedy-corpus-pipeline.md   # ⭐ Spec v2 (fuente de verdad)
+│   │   ├── 00-overview.md              # ⭐ Punto de entrada de la spec
+│   │   ├── llm-policy.md               # Coste/LLM/copyright, P16
+│   │   └── comedy-corpus-pipeline.md   # (histórico, redirige a 00-overview.md)
 │   ├── CORPUS_INVENTORY.md      # Generado en Fase 0
 │   └── decisions/               # ADRs
 │
@@ -321,9 +323,9 @@ comedy-corpus-pipeline/
 │   │   ├── enrichers/           # metadata_tagger (opcional v1)
 │   │   └── pipeline.py
 │   │
-│   └── jokes/                   # Flujos B y C — chistes (LLM → Supabase)
-│       ├── telegram_bot.py      # Flujo B (realtime)
-│       ├── historico/           # Flujo C (batch): loader, segmentador
+│   └── jokes/                   # Flujos B y C — chistes (LLM → Supabase). SPEC.md compartido
+│       ├── telegram/            # Flujo B (realtime): telegram_bot.py. SPEC.md propio
+│       ├── historico/           # Flujo C (batch): loader, segmentador. SPEC.md propio
 │       ├── silver.py            # Silver LLM (compartido B/C)
 │       ├── reconciliacion.py    # hash + embedding (compartido B/C)
 │       └── supabase_store.py
@@ -446,8 +448,9 @@ Ver /docs/CORPUS_INVENTORY.md cuando esté completo.
   - Stats report revisado y aprobado manualmente
   - Corpus entregado a `/data/processed/v1/` listo para el RAG
 
-> Los Hitos 1–4 son el **Flujo A (teoría)**. Los Hitos 5–6 cubren los flujos de
-> chistes (v2). Ver detalle en `/docs/specs/comedy-corpus-pipeline.md` §5–§11.
+> Los Hitos 1–4 son el **Flujo A (teoría)** (`src/theory/SPEC.md`). Los Hitos
+> 5–6 cubren los flujos de chistes (v2): `src/jokes/SPEC.md` (compartido),
+> `src/jokes/telegram/SPEC.md` (Hito 5) y `src/jokes/historico/SPEC.md` (Hito 6).
 
 ### Hito 5 — Chistes propios (Telegram, Flujo B)
 **Objetivo:** ingesta en tiempo real chiste a chiste, estructurada y deduplicada.
@@ -455,7 +458,10 @@ Ver /docs/CORPUS_INVENTORY.md cuando esté completo.
 - [ ] `telegram_bot`: recibe mensajes → Bronze (raw, dedup por `telegram_update_id`)
 - [ ] Pre-limpieza mínima no destructiva (trim, unicode, strip meta)
 - [ ] `silver`: LLM → `tema`, `estructura_detectada`, `estado`, `sugerencias_mejora`, `chiste_normalizado`
-- [ ] Mapeo a taxonomías (`tema_id`/`tecnica_id`) + cola `candidatos_taxonomia`
+- [ ] Mapeo a taxonomías (`tema_id`/`tecnica_id`) en loop acotado ≤3 intentos
+      (P16, ver `src/jokes/SPEC.md` §Taxonomías + `docs/specs/llm-policy.md`):
+      reintento inyecta la taxonomía real como contexto; agotados los intentos
+      → cola `candidatos_taxonomia`
 - [ ] `reconciliacion`: hash + embedding → IGUAL/CAMBIADO/NUEVO
 - [ ] `supabase_store`: tablas `chistes` + `chistes_revisiones` (versión por chiste)
 - [ ] **Definition of Done:** un chiste enviado por Telegram aparece estructurado en

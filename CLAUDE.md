@@ -1,16 +1,23 @@
 # Comedy Corpus Pipeline — Claude Code Instructions
 
 ## Fuente de verdad
-La especificación completa está en **`/docs/specs/comedy-corpus-pipeline.md`** (v2 multi-fuente).
-Léela antes de implementar. Este CLAUDE.md es la guía operativa resumida; ante
-cualquier discrepancia, manda la spec.
+La spec ya no es un fichero único: está partida por módulo y colocada dentro de
+`src/`, junto al código que gobierna. Empieza por **`docs/specs/00-overview.md`**
+— trae la directriz de qué spec leer según qué vayas a tocar (no hace falta leer
+todas para trabajar en una). Este CLAUDE.md es la guía operativa resumida; ante
+cualquier discrepancia, manda la spec del módulo correspondiente.
+
+Mapa rápido: `src/theory/SPEC.md` (Flujo A) · `src/jokes/SPEC.md` (contrato
+compartido B/C: Silver, Reconciliación, Taxonomías) · `src/jokes/telegram/SPEC.md`
+(Flujo B) · `src/jokes/historico/SPEC.md` (Flujo C) · `src/utils/SPEC.md` ·
+`docs/specs/llm-policy.md` (coste/LLM/copyright, P16).
 
 ## Propósito
 Pipeline de ingesta, limpieza, estructuración y versionado de datos para el Comedy RAG.
 Corpus **multi-fuente**: cada unidad lleva `tipo_fuente` para permitir retrieval
 separado por origen en el RAG downstream.
 
-Tres flujos (ver §3–§6 de la spec):
+Tres flujos (ver `docs/specs/00-overview.md` §3 y el `SPEC.md` de cada módulo):
 - **Flujo A — Teoría** (`src/theory/`): libros/cursos desde Drive, batch, determinista → ficheros `/data/processed/v{N}/`.
 - **Flujo B — Chistes propios** (`src/jokes/`): Telegram, tiempo real, Bronze→Silver (LLM) → Supabase.
 - **Flujo C — Chistes históricos** (`src/jokes/historico/`): batch retroactivo de textos propios → Supabase.
@@ -26,9 +33,11 @@ Nunca modificar, eliminar ni sobrescribir. Todo el trabajo ocurre aguas abajo.
 
 ## Layout del repo
 ```
-src/utils/     # COMPARTIDO: language_detector, quality_scorer, llm/ (cliente + embeddings)
-src/theory/    # Flujo A: drive_monitor, parsers/, cleaners/, detectors/, normalizers/, pipeline.py
-src/jokes/     # Flujos B/C: telegram_bot, silver, reconciliacion, supabase_store, historico/
+src/utils/            # COMPARTIDO: language_detector, quality_scorer, llm/ (cliente + embeddings)
+src/theory/           # Flujo A: drive_monitor, parsers/, cleaners/, detectors/, normalizers/, pipeline.py
+src/jokes/            # Contrato compartido B/C: silver, reconciliacion, supabase_store
+src/jokes/telegram/   # Flujo B: telegram_bot
+src/jokes/historico/  # Flujo C: loader, segmentador
 ```
 Regla de dependencias: `theory/` y `jokes/` NO se importan entre sí. Lo común va a `utils/`.
 
@@ -42,7 +51,7 @@ fragmentos "ejemplo" tienen reglas de limpieza distintas.
 - **Bronze**: raw literal, sagrado. Telegram dedup por `telegram_update_id`.
 - **Silver (LLM)**: produce `tema`, `estructura_detectada`, `estado`, `sugerencias_mejora`, `chiste_normalizado`.
 - **Reconciliación**: hash exacto + similitud embedding → IGUAL (dedup) / CAMBIADO (revisión) / NUEVO.
-- **Histórico**: parte de `.md` con marcadores `[REMATE]…[/REMATE]` y `[CHISTOIDE]…[/CHISTOIDE]`, generados por `scripts/marcar_remates.py` (automático, **por color**: `#FF0000`→REMATE, `#980000`→CHISTOIDE). Segmentador = `[REMATE]` como fin + LLM afina el inicio; `[CHISTOIDE]` NO es frontera (mini-remate interno), se conserva como metadato. Ver §7 de la spec.
+- **Histórico**: parte de `.md` con marcadores `[REMATE]…[/REMATE]` y `[CHISTOIDE]…[/CHISTOIDE]`, generados por `scripts/marcar_remates.py` (automático, **por color**: `#FF0000`→REMATE, `#980000`→CHISTOIDE). Segmentador = `[REMATE]` como fin + LLM afina el inicio; `[CHISTOIDE]` NO es frontera (mini-remate interno), se conserva como metadato. Ver `src/jokes/historico/SPEC.md`.
 
 ## Metodología: SDD + TDD
 1. Lee la spec relevante en /docs/specs/ antes de implementar.
@@ -106,7 +115,7 @@ Chistes: Supabase (Postgres + pgvector), python-telegram-bot, cliente LLM vía A
 
 **Regla de LLM:** NO usar LLMs para el procesado de teoría (determinista, coste cero).
 **Excepción acotada:** el Silver de chistes SÍ usa un LLM barato vía API (imprescindible
-para estructurar/generar). Ver §14 de la spec.
+para estructurar/generar). Ver `docs/specs/llm-policy.md`.
 
 ## Copyright
 Restricción documentada (material de pago no redistribuible si se comercializa).
