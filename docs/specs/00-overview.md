@@ -10,19 +10,25 @@ que gobierna cada una. Lee solo lo que tu tarea necesita.
 
 ## Directriz: qué leer según qué vas a tocar
 
-| Si vas a tocar...                                                 | Lee                                                                    |
-|--------------------------------------------------------------------|--------------------------------------------------------------------------|
-| `src/theory/**` (Flujo A, teoría)                                  | [`src/theory/SPEC.md`](../../src/theory/SPEC.md) + [`llm-policy.md`](llm-policy.md) (regla "no LLM") |
-| `src/jokes/telegram/**` (Flujo B, Telegram)                        | [`src/jokes/telegram/SPEC.md`](../../src/jokes/telegram/SPEC.md) + [`src/jokes/SPEC.md`](../../src/jokes/SPEC.md) + [`llm-policy.md`](llm-policy.md) |
-| `src/jokes/silver.py`, `reconciliacion.py`, `supabase_store.py` (compartido B/C) | [`src/jokes/SPEC.md`](../../src/jokes/SPEC.md) + [`llm-policy.md`](llm-policy.md) |
-| `src/jokes/historico/**`, `scripts/marcar_remates.py` (Flujo C)    | [`src/jokes/historico/SPEC.md`](../../src/jokes/historico/SPEC.md) + [`src/jokes/SPEC.md`](../../src/jokes/SPEC.md) |
-| `src/utils/**`                                                     | [`src/utils/SPEC.md`](../../src/utils/SPEC.md) (apunta al consumidor real) |
-| Nueva fuente, `tipo_fuente`, layout global, regla de dependencias entre módulos | Este documento |
+| Si vas a tocar...                                                 | Spec | Errores conocidos |
+|--------------------------------------------------------------------|--------|----------------------|
+| `src/theory/**` (Flujo A, teoría)                                  | [`src/theory/SPEC.md`](../../src/theory/SPEC.md) + [`llm-policy.md`](llm-policy.md) (regla "no LLM") | [`src/theory/KNOWN_ERRORS.md`](../../src/theory/KNOWN_ERRORS.md) |
+| `src/jokes/telegram/**` (Flujo B, Telegram)                        | [`src/jokes/telegram/SPEC.md`](../../src/jokes/telegram/SPEC.md) + [`src/jokes/SPEC.md`](../../src/jokes/SPEC.md) + [`llm-policy.md`](llm-policy.md) | [`src/jokes/telegram/KNOWN_ERRORS.md`](../../src/jokes/telegram/KNOWN_ERRORS.md) |
+| `src/jokes/silver.py`, `reconciliacion.py`, `supabase_store.py` (compartido B/C) | [`src/jokes/SPEC.md`](../../src/jokes/SPEC.md) + [`llm-policy.md`](llm-policy.md) | [`src/jokes/KNOWN_ERRORS.md`](../../src/jokes/KNOWN_ERRORS.md) |
+| `src/jokes/historico/**`, `scripts/marcar_remates.py` (Flujo C)    | [`src/jokes/historico/SPEC.md`](../../src/jokes/historico/SPEC.md) + [`src/jokes/SPEC.md`](../../src/jokes/SPEC.md) | [`src/jokes/historico/KNOWN_ERRORS.md`](../../src/jokes/historico/KNOWN_ERRORS.md) |
+| `src/utils/**`                                                     | [`src/utils/SPEC.md`](../../src/utils/SPEC.md) (apunta al consumidor real) | [`src/utils/KNOWN_ERRORS.md`](../../src/utils/KNOWN_ERRORS.md) |
+| Nueva fuente, `tipo_fuente`, layout global, regla de dependencias entre módulos | Este documento | [`KNOWN_ERRORS_GLOBAL.md`](KNOWN_ERRORS_GLOBAL.md) |
 
 **No hace falta leer los cinco specs para tocar uno.** `src/jokes/telegram/SPEC.md`
 e `historico/SPEC.md` remiten a `src/jokes/SPEC.md` para lo que comparten
 (Silver, Reconciliación, Taxonomías) en vez de repetirlo — si tu tarea es
 puramente de un flujo, con su spec + el compartido basta.
+
+**Protocolo de errores conocidos:** antes de depurar un error por prueba y
+error, busca primero en el `KNOWN_ERRORS.md` del módulo (tabla de arriba). Si
+ya ocurrió, aplica la solución documentada. Si es nuevo, documéntalo ahí (o en
+`KNOWN_ERRORS_GLOBAL.md` si cruza módulos) al resolverlo — regla completa en
+`CLAUDE.md`.
 
 ## 1. Propósito y alcance
 
