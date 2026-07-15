@@ -48,3 +48,36 @@ antes de dar la tarea por terminada — formato fijo en la cabecera de cada fich
 1. Lee el `SPEC.md` del módulo (tabla de arriba) antes de implementar.
 2. Escribe tests primero con fixtures reales de `/tests/fixtures/` (nunca inventados).
 3. Tests: `pytest tests/unit/ -v`, `pytest tests/integration/ -v`; antes de commit `python scripts/validate_corpus.py`.
+
+## Harness de agentes — modo EJECUTOR
+
+Este proyecto trabaja con un harness de agentes en modo **EJECUTOR**
+(ejecución autónoma dentro del scope de cada tarea; escalar al usuario solo
+ante ambigüedad de diseño o rechazo repetido).
+
+| Agente | Modo | Fichero | Función |
+|---|---|---|---|
+| leader | DIRECTOR | `.claude/agents/leader.md` | Orquesta: asigna tareas del backlog, evalúa rechazos, escala al usuario |
+| planner | ARQUITECTO | `.claude/agents/planner.md` | Descompone objetivos en tareas atómicas y asigna complejidad |
+| implementer | BISTURÍ | `.claude/agents/implementer.md` | Implementa la tarea activa sin salirse del scope |
+| reviewer | FISCAL | `.claude/agents/reviewer.md` | Aprueba/rechaza contra `CHECKPOINTS.md`, no contra opinión |
+
+El rol de leader lo ejerce la **sesión principal** de Claude Code: es quien
+invoca a planner, implementer y reviewer como subagentes siguiendo `.claude/agents/leader.md`.
+
+### Tareas atómicas y política de modelos
+- Toda tarea del backlog es **atómica**: un entregable verificable, cabe en una
+  sesión, scope cerrado. Un objetivo amplio ("monta el flujo B entero") no entra
+  al backlog: primero pasa por el planner, que lo descompone.
+- Cada tarea lleva `complejidad` en `feature_list.json`, y el leader la lanza
+  con el modelo de su tier: `alta` (diseño, prompts, decisiones) → modelo
+  potente (ej. Opus), `media` (implementación estándar) → modelo intermedio
+  (ej. Sonnet), `baja` (mecánica) → modelo económico (ej. Haiku).
+
+- **Backlog:** `feature_list.json` — trabajar siempre sobre la siguiente tarea
+  `pending`; marcarla `done` solo tras aprobación del reviewer.
+- **Criterios de validación:** `CHECKPOINTS.md` (criterios de aceptación + reglas del harness).
+- **Mapa de roles:** `AGENTS.md`. **Verificación de entorno:** `bash init.sh`.
+- Máximo 3 rechazos del reviewer sobre la misma tarea antes de escalar al usuario.
+- El ciclo por tarea respeta la metodología de arriba: spec del módulo → tests
+  con fixtures reales → implementación → reviewer.

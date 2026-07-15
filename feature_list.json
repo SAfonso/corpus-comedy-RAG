@@ -1,0 +1,23 @@
+[
+  { "id": 1,  "title": "Inicializar entorno: .env desde .env.example, dependencias, bash init.sh en verde", "module": "raíz", "status": "pending", "priority": "high", "complejidad": "baja", "depends_on": [] },
+  { "id": 2,  "title": "Flujo A: DriveMonitor con idempotencia por hash MD5 (processed_files.json)", "module": "src/theory", "status": "pending", "priority": "high", "complejidad": "media", "depends_on": [1] },
+  { "id": 3,  "title": "Flujo A: whisperx_parser — quitar timestamps/speaker tags, conservar speaker dominante como metadato", "module": "src/theory/parsers", "status": "pending", "priority": "high", "complejidad": "media", "depends_on": [1] },
+  { "id": 4,  "title": "Flujo A: pdf_parser con OCR (Tesseract) para escaneados", "module": "src/theory/parsers", "status": "pending", "priority": "high", "complejidad": "media", "depends_on": [1] },
+  { "id": 5,  "title": "Flujo A: epub_parser", "module": "src/theory/parsers", "status": "pending", "priority": "medium", "complejidad": "baja", "depends_on": [1] },
+  { "id": 6,  "title": "Flujo A: docx_parser", "module": "src/theory/parsers", "status": "pending", "priority": "medium", "complejidad": "baja", "depends_on": [1] },
+  { "id": 7,  "title": "Flujo A: SubtypeDetector (explicacion|ejemplo) — se ejecuta ANTES que el Cleaner", "module": "src/theory", "status": "pending", "priority": "high", "complejidad": "media", "depends_on": [3, 4, 5, 6] },
+  { "id": 8,  "title": "Flujo A: Cleaner agresivo solo para subtipo=explicacion", "module": "src/theory", "status": "pending", "priority": "high", "complejidad": "media", "depends_on": [7] },
+  { "id": 9,  "title": "Flujo A: LanguageDetector + LanguageNormalizer (teoría a español, ejemplos en idioma original)", "module": "src/theory", "status": "pending", "priority": "medium", "complejidad": "media", "depends_on": [7] },
+  { "id": 10, "title": "Flujo A: QualityScorer (score 0-1 de densidad de contenido útil)", "module": "src/theory", "status": "pending", "priority": "medium", "complejidad": "media", "depends_on": [8] },
+  { "id": 11, "title": "Flujo A: FormatNormalizer + salida /data/processed/v{N}/ con cabecera YAML y manifest.json inmutable", "module": "src/theory", "status": "pending", "priority": "high", "complejidad": "media", "depends_on": [8, 9, 10] },
+  { "id": 12, "title": "Contrato B/C: supabase_store.py + DDL de tablas (chistes, revisiones, taxonomías, candidatos)", "module": "src/jokes", "status": "pending", "priority": "high", "complejidad": "media", "depends_on": [1] },
+  { "id": 13, "title": "Contrato B/C: silver.py — estructuración por LLM (tema, estructura, estado, sugerencias, normalizado)", "module": "src/jokes", "status": "pending", "priority": "high", "complejidad": "media", "depends_on": [12] },
+  { "id": 14, "title": "Contrato B/C: mapeo de taxonomías con loop acotado P16 (≤3 intentos, cola candidatos_taxonomia)", "module": "src/jokes", "status": "pending", "priority": "medium", "complejidad": "media", "depends_on": [13] },
+  { "id": 15, "title": "Contrato B/C: reconciliacion.py — dedup híbrido hash + embedding (IGUAL/CAMBIADO/NUEVO)", "module": "src/jokes", "status": "pending", "priority": "high", "complejidad": "media", "depends_on": [13] },
+  { "id": 16, "title": "Flujo B: telegram_bot.py — Bronze inmutable, idempotencia por telegram_update_id, pre-limpieza mínima", "module": "src/jokes/telegram", "status": "pending", "priority": "medium", "complejidad": "media", "depends_on": [13] },
+  { "id": 17, "title": "Flujo C: scripts/marcar_remates.py — color→[REMATE]/[CHISTOIDE] con validación round-trip", "module": "src/jokes/historico", "status": "pending", "priority": "medium", "complejidad": "media", "depends_on": [1] },
+  { "id": 18, "title": "Flujo C: loader.py con idempotencia por hash MD5 de documento", "module": "src/jokes/historico", "status": "pending", "priority": "medium", "complejidad": "baja", "depends_on": [17] },
+  { "id": 19, "title": "Flujo C: segmentador.py — diseño del prompt de inicio de setup (juicio semántico, sin loop, revisión humana muestral)", "module": "src/jokes/historico", "status": "pending", "priority": "medium", "complejidad": "alta", "depends_on": [17, 13] },
+  { "id": 20, "title": "scripts/validate_corpus.py operativo como gate previo a cada commit", "module": "scripts", "status": "pending", "priority": "high", "complejidad": "media", "depends_on": [11] },
+  { "id": 21, "title": "Ingesta de /data/processed/v{N}/ a Supabase (teoria_chunks + índice pgvector compartido)", "module": "src/theory", "status": "pending", "priority": "medium", "complejidad": "media", "depends_on": [11, 12] }
+]
