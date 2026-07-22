@@ -17,6 +17,29 @@
 
 ---
 
+## Task 9 — LanguageDetector + LanguageNormalizer
+
+**Fecha:** 2026-07-22
+**Resultado:** APROBADA sin rechazos. `src/utils/language_detector.py`
+(`detect_language`, vía `langdetect`) + `src/theory/normalizers/language_normalizer.py`
+(`normalize_language`, `_necesita_traduccion` como función pura sin red,
+traductor inyectable). `subtipo=ejemplo` nunca se traduce; `subtipo=explicacion`
+se traduce a español solo si el idioma detectado no es ya español. 53/53 unit
++ 4/4 integration (1 skip documentado) en verde. PR #4 mergeado.
+
+**Hallazgo importante (no bloqueante para esta tarea, sí para producción):**
+`deep_translator` 1.11.4 (última en PyPI) autentica contra DeepL con `auth_key`
+por query param — DeepL deprecó ese método en noviembre 2025 y ahora exige
+cabecera `Authorization: DeepL-Auth-Key`. La `DEEPL_API_KEY` de `.env` es
+válida (confirmado con llamada `requests` directa), pero la librería falla con
+`AuthorizationException`. Documentado en `src/theory/KNOWN_ERRORS.md`. La
+lógica de decisión de `language_normalizer.py` está aislada y testeada sin
+red, así que no bloquea el cierre de la task 9 — pero SÍ bloqueará la
+traducción real de los libros en inglés del corpus hasta que se resuelva
+(esperar parche de `deep_translator`, o cambiar a llamada HTTP directa con la
+cabecera correcta — cambio de stack que requiere decisión explícita). Revisar
+antes/durante la task 11 (FormatNormalizer + salida real del corpus).
+
 ## Task 8 — Cleaner agresivo (subtipo=explicacion)
 
 **Fecha:** 2026-07-22
