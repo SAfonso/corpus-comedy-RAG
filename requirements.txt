@@ -20,6 +20,9 @@ google-auth-oauthlib
 # Scheduler
 APScheduler
 
+# Chistes (Flujos B/C) — Supabase (Postgres + pgvector), ver src/jokes/SPEC.md §Stack
+supabase                 # Cliente supabase-py (API REST/PostgREST), task 12: supabase_store.py
+
 # Testing
 pytest
 pytest-cov
