@@ -17,6 +17,28 @@
 
 ---
 
+## Task 12 — supabase_store.py + DDL
+
+**Fecha:** 2026-07-23
+**Resultado:** APROBADA sin rechazos. `src/jokes/schema.sql` (DDL idempotente,
+`IF NOT EXISTS`, para aplicar a mano en el SQL Editor de Supabase — el
+cliente `supabase-py` vía REST/PostgREST no puede ejecutar DDL) con las
+tablas exactas del boceto de `src/jokes/SPEC.md` §Storage: `temas`,
+`tecnicas`, `fuentes`, `chistes`, `chistes_revisiones`, `candidatos_taxonomia`
++ `teoria_chunks` (incluida por completitud, cliente fuera de scope hasta
+task 21). `src/jokes/supabase_store.py`: CRUD vía `supabase-py`, lógica de
+validación de payloads aislada y testeada sin red (38 tests). Test de
+integración real contra el proyecto Supabase del usuario (conexión
+verificada) — hace `skip` claro porque `schema.sql` aún no se ha aplicado
+(error `PGRST205` de PostgREST, documentado como hallazgo nuevo en
+`src/jokes/KNOWN_ERRORS.md`, creado en esta tarea). 181/181 tests + 3 skips
+esperados (1 DeepL + 2 Supabase-sin-tablas) en verde, sin regresión.
+Verificado por el leader. PR #10 mergeado.
+
+**Pendiente de acción del usuario:** aplicar `src/jokes/schema.sql` en el SQL
+Editor de Supabase para que las tasks 13-16/19/21 puedan correr integración
+real contra las tablas en vez de skip.
+
 ## Task 20 — scripts/validate_corpus.py
 
 **Fecha:** 2026-07-22
