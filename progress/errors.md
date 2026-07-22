@@ -17,6 +17,19 @@
 
 ---
 
+## Task 18 — loader.py (Flujo C)
+
+**Fecha:** 2026-07-22
+**Resultado:** APROBADA sin rechazos. `src/jokes/historico/loader.py`: clase
+`Loader` con `folder`/`state_path` inyectados, hash MD5 en streaming del
+documento completo (no evento, a diferencia del Flujo B), estado persistido
+en JSON propio (sin importar `drive_monitor.py` de `theory/` — lógica
+duplicada deliberadamente, ~10 líneas, para respetar la regla de no-import
+entre `theory/`/`jokes/`). Segunda llamada sin cambios devuelve lista vacía
+(idempotencia verificada). Test con fixture real (`Freskito-Informático.md`
+copiado a `tmp_path`). 118/118 tests + 1 skip conocido (DeepL) en verde, sin
+regresión. Verificado por el leader. PR #8 mergeado.
+
 ## Task 17 — scripts/marcar_remates.py
 
 **Fecha:** 2026-07-22
