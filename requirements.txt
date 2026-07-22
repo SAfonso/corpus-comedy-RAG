@@ -10,6 +10,7 @@ langdetect               # Detección de idioma
 
 # Traducción (free tier)
 deep-translator          # Wrapper DeepL free / LibreTranslate
+python-dotenv            # Carga DEEPL_API_KEY (y resto de .env) en entorno (task 9, language_normalizer.py)
 
 # Google Drive
 google-api-python-client
