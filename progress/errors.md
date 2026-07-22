@@ -17,6 +17,28 @@
 
 ---
 
+## Task 13 — silver.py (estructuración por LLM)
+
+**Fecha:** 2026-07-23
+**Resultado:** APROBADA sin rechazos. `src/jokes/silver.py`: dado el texto de
+un chiste, produce `tema`/`estructura_detectada`/`estado` (enum estricto
+`idea_suelta|con_estructura|rematado`)/`sugerencias_mejora`/`chiste_normalizado`
+vía Gemini (SDK `google-genai`, salida JSON estructurada con `responseSchema`),
+una sola llamada sin loop de reintento (P16). Cliente LLM genérico extraído a
+`src/utils/llm/client.py` (compartido con la futura task 14) — ampliación de
+scope documentada explícitamente en el PR, justificada por la regla "código
+común → `src/utils/`". Limpia el marcado `[REMATE]`/`[CHISTOIDE]` de Histórico
+antes del prompt. Test de integración real contra Gemini con el chiste real
+de `Freskito-Informático.md` (verificado con ejemplo de respuesta real:
+tema="Idiomas y Tinder", estado="rematado"). 216/216 tests + 1 skip (DeepL)
+en verde — confirmado que los 2 tests de Supabase de la task 12 ya pasan en
+verde (antes en skip) tras aplicar `schema.sql`. Verificado por el leader
+(incluyendo grep de que no se importa `theory/`). PR #11 mergeado.
+
+**Nota:** primer credencial de este bloque (Supabase/Telegram/Gemini)
+verificada end-to-end también en producción real vía LLM — pgvector schema
+fix aplicado en el commit previo (`4110a9b`) confirmado funcional.
+
 ## Task 12 — supabase_store.py + DDL
 
 **Fecha:** 2026-07-23
