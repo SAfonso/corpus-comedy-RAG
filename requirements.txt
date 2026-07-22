@@ -22,6 +22,7 @@ APScheduler
 
 # Chistes (Flujos B/C) — Supabase (Postgres + pgvector), ver src/jokes/SPEC.md §Stack
 supabase                 # Cliente supabase-py (API REST/PostgREST), task 12: supabase_store.py
+google-genai              # Cliente oficial de Gemini (LLM barato, §Silver), task 13: src/utils/llm/client.py
 
 # Testing
 pytest
