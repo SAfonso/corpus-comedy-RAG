@@ -17,6 +17,21 @@
 
 ---
 
+## Task 8 — Cleaner agresivo (subtipo=explicacion)
+
+**Fecha:** 2026-07-22
+**Resultado:** APROBADA sin rechazos. `src/theory/cleaners/transcript_cleaner.py`:
+elimina muletillas reales del fixture ("o sea", "bueno,", "¿vale?", "¿no?",
+"digamos", "esto es", "eh", "básicamente,") y repeticiones consecutivas
+(palabra/cláusula) solo para `subtipo=explicacion`; `subtipo=ejemplo` se
+conserva carácter a carácter (excepción explícita de la spec). Añade
+`agrupar_en_parrafos`. Determinista, sin LLM. **Gap de scope documentado**
+(mismo patrón que el OCR de `pdf_parser`): "corrige errores obvios de
+transcripción" queda fuera del MVP por no existir fixture real de errores
+sobre el que construir la heurística sin inventarla. 37/37 tests en verde
+(33 unit + 4 integration), sin regresión. Verificado de forma independiente
+por el leader. PR #3 mergeado.
+
 ## Task 7 — SubtypeDetector (explicacion|ejemplo)
 
 **Fecha:** 2026-07-22

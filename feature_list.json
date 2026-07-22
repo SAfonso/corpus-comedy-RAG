@@ -6,7 +6,7 @@
   { "id": 5,  "title": "Flujo A: epub_parser — markitdown (P17) si cubre EPUB con calidad suficiente, si no ebooklib", "module": "src/theory/parsers", "status": "done", "priority": "medium", "complejidad": "baja", "depends_on": [1] },
   { "id": 6,  "title": "Flujo A: docx_parser con markitdown (P17)", "module": "src/theory/parsers", "status": "done", "priority": "medium", "complejidad": "baja", "depends_on": [1] },
   { "id": 7,  "title": "Flujo A: SubtypeDetector (explicacion|ejemplo) — se ejecuta ANTES que el Cleaner", "module": "src/theory", "status": "done", "priority": "high", "complejidad": "media", "depends_on": [3, 4, 5, 6] },
-  { "id": 8,  "title": "Flujo A: Cleaner agresivo solo para subtipo=explicacion", "module": "src/theory", "status": "pending", "priority": "high", "complejidad": "media", "depends_on": [7] },
+  { "id": 8,  "title": "Flujo A: Cleaner agresivo solo para subtipo=explicacion", "module": "src/theory", "status": "done", "priority": "high", "complejidad": "media", "depends_on": [7] },
   { "id": 9,  "title": "Flujo A: LanguageDetector + LanguageNormalizer (teoría a español, ejemplos en idioma original)", "module": "src/theory", "status": "pending", "priority": "medium", "complejidad": "media", "depends_on": [7] },
   { "id": 10, "title": "Flujo A: QualityScorer (score 0-1 de densidad de contenido útil)", "module": "src/theory", "status": "pending", "priority": "medium", "complejidad": "media", "depends_on": [8] },
   { "id": 11, "title": "Flujo A: FormatNormalizer + salida /data/processed/v{N}/ con cabecera YAML y manifest.json inmutable", "module": "src/theory", "status": "pending", "priority": "high", "complejidad": "media", "depends_on": [8, 9, 10] },
