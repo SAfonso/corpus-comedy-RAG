@@ -17,6 +17,39 @@
 
 ---
 
+## Task 6 — docx_parser (markitdown, P17)
+
+**Fecha:** 2026-07-22
+**Resultado:** APROBADA sin rechazos (ciclo ejecutado en una sola sub-sesión,
+NOTARIO→BISTURÍ→FISCAL→NOTARIO→CENTINELA, modelo económico por complejidad
+baja). `docx_parser.py` sigue el patrón de `epub_parser.py` (sin OCR
+fallback — `.docx` no es formato escaneado), `MarkItDown(enable_plugins=False)`.
+19/19 unit + 4/4 integration en verde. PR #1 mergeado a `main`.
+
+**Fixture real bloqueada inicialmente:** no existe ningún `.docx` nativo en
+el corpus (`data/raw/books/` solo tiene `.pdf`/`.epub`) ni en `tests/fixtures/`.
+Se descartó un fixture propuesto por el usuario (`Freskito-Informático.docx`)
+por resultar ser material del Flujo C (monólogo con remates marcados en
+color, detectado al inspeccionar `word/document.xml`: contenía tokens
+`[REMATE]` ya procesados por `notebooks/marcar_remates_colab.ipynb`) — mezclarlo
+en Flujo A habría violado la regla de no-import entre `theory/`/`jokes/`.
+Se resolvió creando `tests/fixtures/comedy_bible_excerpt.docx`: texto REAL
+extraído con `markitdown` de un pasaje en prosa de
+`data/raw/books/Judy_Carter_The_Comedy_Bible.pdf` (libro real del corpus),
+re-empaquetado a `.docx` con `python-docx` — no es contenido inventado, solo
+un cambio de contenedor porque el formato nativo no existía todavía en el
+corpus.
+
+**Error de proceso detectado tras el cierre (no de código):** el commit de
+la sub-sesión (`9414844`) incluyó `docx_parser.py` y el test pero NO el
+fixture `comedy_bible_excerpt.docx` (se quedó fuera del `git add` con scope
+acotado a "solo los ficheros de la tarea", y el fixture no se consideró
+parte de ese scope aunque el test dependía de él). Rompía el test en un
+checkout limpio. **Solución:** commit de seguimiento (`2c1a119`) añadiendo
+el fixture. **Lección para próximas tareas:** al acotar `git add` al scope
+de la tarea, verificar explícitamente que cualquier fixture nuevo referenciado
+por un test nuevo queda incluido, no solo el código y el test.
+
 ## Task 5 — epub_parser (markitdown, P17)
 
 **Fecha:** 2026-07-22
