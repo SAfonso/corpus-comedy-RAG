@@ -17,6 +17,24 @@
 
 ---
 
+## Task 20 — scripts/validate_corpus.py
+
+**Fecha:** 2026-07-22
+**Resultado:** APROBADA sin rechazos. Implementa los 8 checks de
+`ROADMAP_DATA_PIPELINE.md` (§Checks de Validación del Corpus Final): sin
+timestamps, sin speaker tags, cabecera completa (7 campos), min/max palabras
+(100/50.000), sin duplicados MD5, idiomas permitidos (es/en), manifest
+sincronizado con los ficheros reales. Alcance limitado a Flujo A (Flujos B/C
+aún bloqueados por credenciales — ver hallazgo de la task 9 y bloqueo abierto
+más abajo). Cada check testeado en caso feliz y de fallo, todos derivados de
+una estructura `v1/` real generada con la cadena completa aprobada
+(parser→detector→cleaner→normalizer→format_normalizer), mutada para forzar
+cada fallo — sin fixtures inventadas desde cero. Exit code 1 + mensaje claro
+cuando no hay ninguna versión que validar (verificado manualmente contra el
+repo real, que aún no tiene ningún `v{N}` generado). 143/143 tests + 1 skip
+conocido (DeepL) en verde, sin regresión. Verificado por el leader
+(incluyendo ejecución manual del script). PR #9 mergeado.
+
 ## Task 18 — loader.py (Flujo C)
 
 **Fecha:** 2026-07-22
