@@ -17,6 +17,16 @@
 
 ---
 
+## Task 10 — QualityScorer
+
+**Fecha:** 2026-07-22
+**Resultado:** APROBADA sin rechazos. `src/utils/quality_scorer.py`: media
+ponderada de longitud (saturación suave, peso 0.4), diversidad léxica/TTR
+(peso 0.3) y ratio de contenido vs. palabras funcionales (peso 0.3),
+normalizada a [0,1]. Verificado con fragmentos reales del corpus (párrafo de
+teoría ≈0.69 vs. frase de saludo corta ≈0.56; vacío/puntuación → 0.0 exacto).
+65/65 tests + 1 skip conocido (DeepL) en verde, sin regresión. PR #5 mergeado.
+
 ## Task 9 — LanguageDetector + LanguageNormalizer
 
 **Fecha:** 2026-07-22
