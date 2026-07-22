@@ -20,7 +20,12 @@
 -- resto de §Storage), pero su cliente de acceso es scope de la task 21
 -- (ingesta de teoría), no de esta tarea.
 
-create extension if not exists vector;
+-- schema explícito a "public": pgvector puede instalarse en el schema
+-- "extensions" en algunos proyectos Supabase, y si el search_path de la
+-- sesión no lo incluye, el tipo "vector" no se resuelve aunque la extensión
+-- ya exista (síntoma real visto al aplicar este fichero: 42704 "type vector
+-- does not exist"). Forzar "public" evita depender del search_path.
+create extension if not exists vector schema public;
 
 -- ---------------------------------------------------------------------------
 -- Taxonomías editables (§Taxonomías) — fuente de verdad relacional en Supabase
