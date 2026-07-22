@@ -17,6 +17,19 @@
 
 ---
 
+## Task 7 — SubtypeDetector (explicacion|ejemplo)
+
+**Fecha:** 2026-07-22
+**Resultado:** APROBADA sin rechazos. `src/theory/detectors/subtype_detector.py`:
+`FragmentoSubtipo(texto, subtipo)` + `detect_subtypes(texto) -> list[FragmentoSubtipo]`,
+granularidad por frase, heurística de marcadores lingüísticos de
+`docs/CORPUS_INVENTORY.md` Bloque 5 ("un ejemplo", "por ejemplo", "algo así
+como", case-insensitive), 100% determinista sin LLM. Test contra
+`tests/fixtures/sample_transcript.txt` (real, vía `parse_whisperx_transcript`).
+28/28 tests en verde (24 unit + 4 integration), sin regresión en tasks 1-6.
+Verificado de forma independiente por el leader (re-ejecución de la suite +
+`git show --stat` del commit: solo los 2 ficheros de scope). PR #2 mergeado.
+
 ## Task 6 — docx_parser (markitdown, P17)
 
 **Fecha:** 2026-07-22
