@@ -17,6 +17,24 @@
 
 ---
 
+## Task 14 — taxonomias.py (mapeo con loop acotado P16)
+
+**Fecha:** 2026-07-23
+**Resultado:** APROBADA sin rechazos. `src/jokes/taxonomias.py`:
+`resolver_taxonomia(texto, tipo, store, ...)` mapea `tema`/`estructura_detectada`
+(strings libres de `silver.py`) a IDs reales de `temas`/`tecnicas`. Loop
+acotado a 3 intentos: intento 1 sin contexto; intentos 2-3 inyectan la
+taxonomía real completa de Supabase. Criterio de parada binario y externo
+(`_encontrar_match`, función pura sin red — nunca decide el LLM). Agotados
+los 3 intentos sin match, encola en `candidatos_taxonomia` vía
+`supabase_store.py` (nunca crea fila de taxonomía directamente). Reusa
+`src/utils/llm/client.py` y `supabase_store.py` sin duplicar lógica. Tests de
+integración reales: siembran una fila real en `tecnicas` para el caso de
+match y limpian después; fuerzan agotamiento para el caso de cola y limpian
+el candidato creado — verificado por el leader que las tablas quedan a 0
+filas residuales tras la corrida. 247/247 tests + 1 skip (DeepL) en verde,
+sin regresión. PR #12 mergeado.
+
 ## Task 13 — silver.py (estructuración por LLM)
 
 **Fecha:** 2026-07-23
