@@ -17,6 +17,24 @@
 
 ---
 
+## Task 11 — FormatNormalizer + salida v{N} inmutable
+
+**Fecha:** 2026-07-22
+**Resultado:** APROBADA sin rechazos. `src/theory/normalizers/format_normalizer.py`:
+YAML frontmatter por documento (`fuente`/`autor`/`tipo_fuente`/`licencia` a
+nivel documento + lista `fragmentos` con `subtipo`/`idioma_original`/
+`idioma_fragmento` por fragmento, en orden posicional con los párrafos del
+cuerpo) — cubre los 7 campos de `CHECKPOINTS.md`. Emisor YAML propio (sin
+añadir `pyyaml`, no estaba en requirements). `manifest.json` + `stats.json`
+(usa `score_quality` de la task 10). Inmutabilidad `v{N}`: una versión con
+`manifest.json` ya escrito nunca se sobrescribe — `generar_version()` sin
+argumento crea automáticamente `v{N+1}`; con versión explícita ya finalizada,
+lanza `VersionInmutableError`. Testeado con la cadena real completa
+(whisperx_parser → subtype_detector → transcript_cleaner → language_normalizer)
+sobre `tmp_path`, nunca sobre `/data/processed/` real. 84/84 tests + 1 skip
+conocido (DeepL) en verde, sin regresión. Verificado por el leader: sin
+residuos en `data/processed/` real. PR #6 mergeado.
+
 ## Task 10 — QualityScorer
 
 **Fecha:** 2026-07-22
