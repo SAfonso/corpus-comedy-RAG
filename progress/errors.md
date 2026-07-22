@@ -17,6 +17,25 @@
 
 ---
 
+## Task 17 — scripts/marcar_remates.py
+
+**Fecha:** 2026-07-22
+**Resultado:** APROBADA sin rechazos. Migración fiel del prototipo ya
+validado en `notebooks/marcar_remates_colab.ipynb`: lee `word/document.xml`
+crudo (cubre párrafos/tablas/hyperlinks/listas), clasifica color por tono
+(`#FF0000`→`REMATE`, `#980000`→`CHISTOIDE`), fusiona runs contiguos (incluso
+cruzando párrafos), valida round-trip (caracteres alfanuméricos por color
+== caracteres dentro de la etiqueta) y falla sin escribir `.md` si no cuadra.
+Sin dependencias nuevas (solo stdlib). Salida **byte-a-byte idéntica** al
+`Freskito-Informático.md` real de referencia. Round-trip testeado en caso
+feliz y de fallo (runs perdidos simulados sobre datos derivados del `.docx`
+real). Se aprovechó para comitear por fin los fixtures `Freskito-Informático.*`
+(quedaron sin comitear desde la task 6). Gap documentado: fixture real sin
+tablas/hyperlinks, cobertura resuelta estructuralmente pero sin verificación
+end-to-end de ese caso. 111/111 tests + 1 skip conocido (DeepL) en verde, sin
+regresión. Verificado por el leader: `git status` limpio tras el merge. PR #7
+mergeado.
+
 ## Task 11 — FormatNormalizer + salida v{N} inmutable
 
 **Fecha:** 2026-07-22
