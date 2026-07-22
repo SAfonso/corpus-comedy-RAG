@@ -2,7 +2,9 @@
 
 > **Estado:** v2 (multi-fuente) · **Metodología:** SDD — spec aprobada ANTES de
 > escribir código. **Documento vivo:** decisiones P1–P14, más P15 (marcado
-> histórico por color, 2026-07-06) y P16 (loops LLM, 2026-07-09).
+> histórico por color, 2026-07-06), P16 (loops LLM, 2026-07-09), P17
+> (markitdown para Parser de teoría, 2026-07-21) y P18 (DriveMonitor sobre
+> carpeta local, Drive API real diferida, 2026-07-22).
 
 Este documento es el **punto de entrada**. La spec completa ya no vive en un solo
 fichero: está partida por módulo, colocada **dentro de `src/`**, junto al código

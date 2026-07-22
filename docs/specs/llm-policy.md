@@ -9,6 +9,9 @@
 
 - La regla "NO usar LLMs / NO APIs de pago" se mantiene como norma para
   `externo*` (teoría, batch grande, determinista) — ver `src/theory/SPEC.md`.
+  Incluye `markitdown` (P17, conversión de Parser): solo su modo de
+  conversión determinista, sin activar su plugin opcional de *captioning*
+  de imágenes vía LLM.
 - **Excepción acotada y documentada:** el Silver de chistes (`src/jokes/SPEC.md`)
   es imposible sin generación (`estructura_detectada`, `sugerencias_mejora`,
   `chiste_normalizado`). Usa un LLM barato vía API (tipo Haiku). Los embeddings

@@ -1,9 +1,9 @@
 # Parsers
-pymupdf                  # PDF text extraction (fallback antes de OCR)
-pdf2image                # PDF → imagen para Tesseract
-pytesseract              # OCR para PDFs escaneados
-ebooklib                 # EPUB parsing
-python-docx              # DOCX parsing
+markitdown[pdf,docx]     # PDF/DOCX → Markdown (P17, ver src/theory/SPEC.md §Parser) — sin extra oficial de EPUB
+pdf2image                # PDF → imagen para Tesseract (fallback OCR)
+pytesseract              # OCR para páginas escaneadas que markitdown no extrae
+ebooklib                 # EPUB parsing (si markitdown no cubre EPUB con calidad suficiente)
+python-docx              # DOCX parsing (dependencia interna de markitdown)
 
 # Limpieza y detección
 langdetect               # Detección de idioma

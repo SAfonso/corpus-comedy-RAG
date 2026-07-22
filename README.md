@@ -30,7 +30,7 @@ procesado y aterriza en el almacén correspondiente, que alimenta el RAG.
 
 | Flujo | Módulo | Origen | Naturaleza | Destino |
 |-------|--------|--------|------------|---------|
-| **A — Teoría** | `src/theory/` | Libros/cursos desde Drive | Batch, **determinista**, coste 0 | Ficheros `/data/processed/v{N}/` |
+| **A — Teoría** | `src/theory/` | Libros/cursos (`data/raw/books/` local; Drive real diferido, P18) | Batch, **determinista**, coste 0 | Ficheros `/data/processed/v{N}/` |
 | **B — Chistes propios** | `src/jokes/telegram/` (+ `src/jokes/` compartido) | Telegram (tiempo real) | Bronze → Silver (LLM) | Supabase |
 | **C — Chistes históricos** | `src/jokes/historico/` (+ `src/jokes/` compartido) | Textos propios ya escritos | Batch retroactivo | Supabase |
 
@@ -46,6 +46,12 @@ procesado y aterriza en el almacén correspondiente, que alimenta el RAG.
   interno, **no** es frontera; se conserva como metadato). Marcado **automático**.
 - **Sin LLM en teoría** (determinista, coste 0). Excepción acotada: el **Silver** de
   chistes usa un LLM barato vía API.
+- **Parser de teoría vía markitdown** (P17): `pdf_parser`/`docx_parser` convierten a
+  Markdown con [`markitdown`](https://github.com/microsoft/markitdown); Tesseract
+  queda como *fallback* OCR para páginas escaneadas. Nunca toca `/data/raw/` (sagrado).
+- **DriveMonitor sobre carpeta local** (P18, de momento): vigila `data/raw/books/` y
+  `data/raw/notes/` en vez de la API de Google Drive — misma idempotencia por hash MD5.
+  La integración real con Drive queda diferida, sin tocar el resto de la cadena.
 
 ---
 
@@ -74,9 +80,10 @@ para tocar un módulo. Directriz completa en
 
 ## Stack
 
-**Teoría (coste 0):** `pytesseract` + `pdf2image` (OCR), `ebooklib` (EPUB),
-`python-docx` (DOCX), `pymupdf` (PDF), `langdetect`, `deep-translator`,
-`APScheduler`, `google-api-python-client`.
+**Teoría (coste 0):** `markitdown` (PDF/DOCX → Markdown, P17), `pytesseract` +
+`pdf2image` (OCR *fallback* para escaneados), `ebooklib` (EPUB), `langdetect`,
+`deep-translator` (DeepL free tier), `APScheduler`, `google-api-python-client`
+(Drive real, diferido — P18).
 **Chistes:** Supabase (Postgres + pgvector), `python-telegram-bot`, cliente LLM vía API, embeddings.
 
 ---
@@ -84,12 +91,16 @@ para tocar un módulo. Directriz completa en
 ## Puesta en marcha
 
 ```bash
-pip install -r requirements.txt
 cp .env.example .env          # y rellena tus credenciales
+bash init.sh                  # crea .venv/, instala dependencias, valida el entorno
+source .venv/bin/activate
 pytest tests/unit -v          # tests unitarios
 pytest tests/integration -v   # tests de integración
 python scripts/validate_corpus.py   # antes de cada commit
 ```
+
+> `init.sh` crea el venv porque el sistema puede ser "externally-managed" (PEP 668)
+> y rechazar `pip install` directo contra el Python global.
 
 ---
 
@@ -118,3 +129,7 @@ python scripts/validate_corpus.py   # antes de cada commit
 - [Roadmap de Fase 0](ROADMAP_DATA_PIPELINE.md)
 - [Inventario del corpus](docs/CORPUS_INVENTORY.md)
 - [Guía operativa para Claude Code](CLAUDE.md)
+- [Resumen de arquitectura para LLM](docs/PROJECT_SUMMARY_FOR_LLM.md)
+
+**Harness de agentes** (modo EJECUTOR — leader/planner/implementer/reviewer):
+- [Mapa de agentes](AGENTS.md) · [Criterios de validación](CHECKPOINTS.md) · [Backlog](feature_list.json)
