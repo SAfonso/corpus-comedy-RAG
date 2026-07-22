@@ -29,6 +29,16 @@ EJECUTOR
 **Tools:** ninguna definida
 
 
+### integrator — modo NOTARIO
+**Scope:** Formaliza en git el trabajo aprobado: rama al iniciar la tarea, commit+push+PR al cerrarla
+**Tools:** ninguna definida
+
+
+### watchman — modo CENTINELA
+**Scope:** Verifica CI y merge tras la integración; si falla, reabre el ciclo con el reviewer
+**Tools:** ninguna definida
+
+
 
 ## Flujo
 
@@ -41,6 +51,12 @@ EJECUTOR
 3. implementer →
 
 
-4. reviewer
+4. reviewer →
+
+
+5. integrator →
+
+
+6. watchman
 
 

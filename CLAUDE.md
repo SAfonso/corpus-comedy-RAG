@@ -61,9 +61,16 @@ ante ambigüedad de diseño o rechazo repetido).
 | planner | ARQUITECTO | `.claude/agents/planner.md` | Descompone objetivos en tareas atómicas y asigna complejidad |
 | implementer | BISTURÍ | `.claude/agents/implementer.md` | Implementa la tarea activa sin salirse del scope |
 | reviewer | FISCAL | `.claude/agents/reviewer.md` | Aprueba/rechaza contra `CHECKPOINTS.md`, no contra opinión |
+| integrator | NOTARIO | `.claude/agents/integrator.md` | Rama al iniciar la tarea, commit+push+PR al cerrarla (tras aprobación de FISCAL) |
+| watchman | CENTINELA | `.claude/agents/watchman.md` | Verifica CI/merge y mergea en automático si está en verde; si falla, reabre el ciclo con FISCAL |
 
 El rol de leader lo ejerce la **sesión principal** de Claude Code: es quien
-invoca a planner, implementer y reviewer como subagentes siguiendo `.claude/agents/leader.md`.
+invoca a planner, implementer, reviewer, integrator y watchman como
+subagentes siguiendo `.claude/agents/leader.md`, una sub-sesión por tarea.
+El leader no mantiene memoria conversacional larga entre tareas: su estado
+vive en `progress/ledger.json` (decisiones + resumen de cada tarea cerrada),
+y cada sub-sesión recibe solo el paquete de contexto mínimo de su tarea, no
+el historial completo.
 
 ### Tareas atómicas y política de modelos
 - Toda tarea del backlog es **atómica**: un entregable verificable, cabe en una

@@ -32,5 +32,11 @@ command -v tesseract >/dev/null || echo "AVISO: tesseract no instalado en el sis
 
 "$VENV_PY" -m pytest tests/unit/ -q || echo "AVISO: hay tests unitarios fallando"
 
+echo "Comprobando git/gh (necesarios para integrator/NOTARIO y watchman/CENTINELA)..."
+command -v git >/dev/null || echo "AVISO: git no está instalado"
+command -v gh >/dev/null || echo "AVISO: gh no está instalado — instálalo antes de la primera tarea"
+gh auth status >/dev/null 2>&1 || echo "AVISO: gh no está autenticado — ejecuta 'gh auth login' antes de la primera tarea"
+git remote get-url origin >/dev/null 2>&1 || echo "AVISO: no hay remoto 'origin' configurado — configúralo antes de la primera tarea"
+
 echo "== Entorno verificado — modo EJECUTOR listo =="
 echo "Activa el venv con: source .venv/bin/activate"

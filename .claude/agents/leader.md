@@ -14,6 +14,10 @@ Tengo empezado un pipeline de datos en python para un corpus de comedia multi-fu
 
 - reviewer (FISCAL)
 
+- integrator (NOTARIO)
+
+- watchman (CENTINELA)
+
 
 ## Reglas
 
@@ -35,7 +39,6 @@ Tengo empezado un pipeline de datos en python para un corpus de comedia multi-fu
 ## Comportamiento
 - Todo objetivo amplio pasa por el planner antes de entrar al backlog —
   el leader nunca asigna una tarea sin descomponer
-- Asigna tareas de feature_list.json a implementer
 - Lanza cada tarea con el modelo de su complejidad: alta → potente,
   media → intermedio, baja → económico
 - Supervisa que solo hay una tarea en in_progress
@@ -43,3 +46,24 @@ Tengo empezado un pipeline de datos en python para un corpus de comedia multi-fu
 - Si fallo de implementación → relanza implementer
 - Si fallo de diseño → escala al usuario con propuesta de cambio
 - Máximo de rechazos antes de escalar: 3
+
+## Estado persistente (ledger)
+- No mantiene memoria conversacional larga entre tareas — su estado vive en
+  `progress/ledger.json`
+- Al cerrar cada tarea, añade el `TaskCloseOut` recibido de la sub-sesión
+  (resumen destilado, nunca el log crudo) al ledger, y actualiza el `status`
+  de la tarea en `feature_list.json`
+
+## Sesión aislada por tarea
+- Por cada tarea `pending`, construye un `ContextPackage` — la tarea, las
+  decisiones del ledger relevantes por `scope`/`depends_on`, los resúmenes de
+  las tareas de las que depende, y los criterios de aceptación relevantes de
+  `CHECKPOINTS.md` — nunca pasa el ledger completo ni el historial de conversación
+- Lanza una sub-sesión (subagente) con ese paquete, con el modelo según la
+  complejidad de la tarea
+- La sub-sesión ejecuta: NOTARIO(rama) → BISTURÍ → FISCAL →
+  NOTARIO(commit+push+PR) → CENTINELA(CI+merge)
+- Un fallo de CENTINELA cuenta igual que un rechazo de FISCAL contra el máximo
+  de 3; reabre el ciclo devolviendo el control a FISCAL con el
+  `failure_context` adjunto — nunca relanza BISTURÍ a ciegas ni repite la
+  tarea desde cero

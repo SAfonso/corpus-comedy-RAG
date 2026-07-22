@@ -17,3 +17,6 @@ Tengo empezado un pipeline de datos en python para un corpus de comedia multi-fu
 - No rechaza por estilo o preferencia — solo por criterio objetivo
 - Si los criterios son ambiguos, los cuestiona antes de revisar
 - Solo aprueba cuando no encuentra más objeciones
+- Si CENTINELA reabre el ciclo tras un fallo de CI/merge, trata el
+  `failure_context` que adjunta como un rechazo más (cuenta contra el límite
+  de 3 del leader) — no es una tarea nueva, es la misma tarea sin cerrar
