@@ -16,9 +16,9 @@
 - **Flujo A (Teoría):** completo — los 8 componentes de la cadena implementados
   y testeados (`DriveMonitor` → ... → `FormatNormalizer` → `/data/processed/v{N}/`),
   más `validate_corpus.py` como gate de validación.
-- **Contrato compartido B/C:** `supabase_store.py` + DDL, `silver.py` (LLM) y el
-  mapeo de taxonomías (loop acotado P16) implementados; falta `reconciliacion.py`
-  (dedup hash+embedding, task 15).
+- **Contrato compartido B/C:** `supabase_store.py` + DDL, `silver.py` (LLM), el
+  mapeo de taxonomías (loop acotado P16) y `reconciliacion.py` (dedup
+  hash+embedding, task 15) implementados.
 - **Flujo C (Histórico):** `marcar_remates.py` y `loader.py` implementados; falta
   `segmentador.py` (task 19).
 - **Flujo B (Telegram):** pendiente (`telegram_bot.py`, task 16).

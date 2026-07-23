@@ -1,1 +1,28 @@
-{"decisions": [], "tasks": []}
+{
+  "decisions": [
+    {
+      "task_id": 15,
+      "decision": "reconciliacion.py es agnóstico de Supabase: recibe `candidatos` (lista de dicts id/hash_normalizado/embedding) como argumento en vez de inyectar SupabaseStore. Quién obtiene esos candidatos (qué tipo_fuente, qué alcance) queda para el caller de las tasks 16/19.",
+      "reason": "mantiene el módulo 100% testeable sin red salvo la llamada de embeddings, y evita acoplar la decisión de reconciliación a un método nuevo de supabase_store.py que ningún consumidor real necesita todavía."
+    },
+    {
+      "task_id": 15,
+      "decision": "src/utils/llm/embeddings.py (stub vacío desde Fase 0) se implementó dentro de esta task, no aparte — mismo precedente que task 13 (silver.py + client.py en el mismo PR).",
+      "reason": "reconciliacion.py es el primer y único consumidor; sin el cliente de embeddings la task no es verificable end-to-end."
+    },
+    {
+      "task_id": 15,
+      "decision": "UMBRAL_SIMILITUD_CAMBIADO = 0.85 como constante de módulo (no hardcodeado en la lógica de decisión).",
+      "reason": "SPEC marca el umbral como indicativo/afinable con datos reales — se deja fácil de tocar sin tocar decidir_reconciliacion."
+    }
+  ],
+  "tasks": [
+    {
+      "id": 15,
+      "title": "Contrato B/C: reconciliacion.py — dedup híbrido hash + embedding (IGUAL/CAMBIADO/NUEVO)",
+      "status": "done",
+      "summary": "Implementados src/jokes/reconciliacion.py (calcular_hash_normalizado, similitud_coseno, decidir_reconciliacion, reconciliar_chiste) y src/utils/llm/embeddings.py (generar_embedding vía Gemini, antes vacío). 33 tests unitarios nuevos (0 red) + 1 test de integración real contra Gemini (embeddings), todos en verde. Sin cambios en supabase_store.py — ver decisión de scope arriba. Branch task/15-reconciliacion.",
+      "rejections": 0
+    }
+  ]
+}
