@@ -14,6 +14,16 @@
       "task_id": 15,
       "decision": "UMBRAL_SIMILITUD_CAMBIADO = 0.85 como constante de módulo (no hardcodeado en la lógica de decisión).",
       "reason": "SPEC marca el umbral como indicativo/afinable con datos reales — se deja fácil de tocar sin tocar decidir_reconciliacion."
+    },
+    {
+      "task_id": 16,
+      "decision": "telegram_bot.py NO implementa la conexión real con la API de Telegram (polling/webhook, dependencia python-telegram-bot). procesar_mensaje_telegram recibe el `update` ya como dict con la forma del JSON de la Bot API — el transporte real queda para un futuro script de orquestación del flujo.",
+      "reason": "el título de la task 16 solo pide Bronze/idempotencia/pre-limpieza, no conectividad; mismo patrón ya visto en el repo: scripts/run_pipeline.py (orquestación de Flujo A) sigue vacío pese a que todas las tareas de parsing/limpieza de Flujo A están done — la conectividad/orquestación se trata como entregable aparte, no atado a una task atómica de procesamiento."
+    },
+    {
+      "task_id": 16,
+      "decision": "Se añadió la tabla chistes_telegram_bronze a schema.sql (antes solo existían chistes/chistes_revisiones/temas/tecnicas/fuentes/candidatos_taxonomia/teoria_chunks) y un método guardar_mensaje_telegram_bronze en supabase_store.py (upsert con on_conflict=telegram_update_id, ignore_duplicates=True).",
+      "reason": "el SPEC de Telegram exige persistencia Bronze idempotente en Supabase (no hay ficheros locales como en Flujo A/C) — no existía ninguna tabla ni método previos para eso. Igual que las tablas de la task 12, requiere aplicación manual del schema.sql actualizado en el dashboard de Supabase; el test de integración hace skip con PGRST205 hasta entonces (comportamiento esperado, no una regresión)."
     }
   ],
   "tasks": [
@@ -22,6 +32,13 @@
       "title": "Contrato B/C: reconciliacion.py — dedup híbrido hash + embedding (IGUAL/CAMBIADO/NUEVO)",
       "status": "done",
       "summary": "Implementados src/jokes/reconciliacion.py (calcular_hash_normalizado, similitud_coseno, decidir_reconciliacion, reconciliar_chiste) y src/utils/llm/embeddings.py (generar_embedding vía Gemini, antes vacío). 33 tests unitarios nuevos (0 red) + 1 test de integración real contra Gemini (embeddings), todos en verde. Sin cambios en supabase_store.py — ver decisión de scope arriba. Branch task/15-reconciliacion.",
+      "rejections": 0
+    },
+    {
+      "id": 16,
+      "title": "Flujo B: telegram_bot.py — Bronze inmutable, idempotencia por telegram_update_id, pre-limpieza mínima",
+      "status": "done",
+      "summary": "Implementado src/jokes/telegram/telegram_bot.py (limpiar_texto_telegram, _extraer_datos_mensaje, procesar_mensaje_telegram) contra un `update` con la forma del JSON de la Bot API de Telegram, sin dependencia del SDK. Añadidos chistes_telegram_bronze a schema.sql y guardar_mensaje_telegram_bronze a supabase_store.py (upsert idempotente, ON CONFLICT DO NOTHING real). 40 tests unitarios nuevos (0 red) + 1 test de integración (skip esperado: tabla nueva, pendiente de aplicar schema.sql en Supabase). Conectividad real con Telegram fuera de scope — ver decisión arriba. Branch task/16-telegram-bot.",
       "rejections": 0
     }
   ]
