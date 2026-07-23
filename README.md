@@ -6,13 +6,13 @@
 ![markitdown](https://img.shields.io/badge/markitdown-PDF%2FDOCX%E2%86%92MD-000000?style=flat-square&logo=microsoft&logoColor=white)
 ![DeepL](https://img.shields.io/badge/DeepL-translation-0F2B46?style=flat-square)
 ![pytest](https://img.shields.io/badge/tested%20with-pytest-0A9EDC?style=flat-square&logo=pytest&logoColor=white)
-![Estado](https://img.shields.io/badge/status-17%2F21%20tareas%20%E2%80%94%20en%20progreso-yellow?style=flat-square)
+![Estado](https://img.shields.io/badge/status-20%2F21%20tareas%20%E2%80%94%20en%20progreso-yellow?style=flat-square)
 
 > Pipeline de **ingesta, limpieza, estructuración y versionado** de datos para el
 > **Comedy RAG**. Corpus **multi-fuente**: cada unidad lleva `tipo_fuente` para
 > permitir *retrieval* separado por origen en el RAG *downstream*.
 
-**Estado:** 17/21 tareas del backlog cerradas (ver [`feature_list.json`](feature_list.json)).
+**Estado:** 20/21 tareas del backlog cerradas (ver [`feature_list.json`](feature_list.json)).
 - **Flujo A (Teoría):** completo — los 8 componentes de la cadena implementados
   y testeados (`DriveMonitor` → ... → `FormatNormalizer` → `/data/processed/v{N}/`),
   más `validate_corpus.py` como gate de validación.
@@ -25,7 +25,8 @@
   idempotencia por `telegram_update_id`, pre-limpieza mínima, task 16); la
   conexión real con la API de Telegram (polling/webhook) queda para el script
   de orquestación del flujo.
-- **Ingesta de teoría a Supabase** (`teoria_chunks`, task 21): pendiente.
+- **Ingesta de teoría a Supabase** (`teoria_chunks` + índice pgvector
+  compartido, task 21): implementada (`src/theory/ingest_teoria.py`).
 
 **Metodología:** SDD estricto (spec → tests con fixtures reales → implementación).
 **Fuente de verdad:** [`docs/specs/00-overview.md`](docs/specs/00-overview.md) — la spec

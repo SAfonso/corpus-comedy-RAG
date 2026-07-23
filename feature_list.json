@@ -19,5 +19,5 @@
   { "id": 18, "title": "Flujo C: loader.py con idempotencia por hash MD5 de documento", "module": "src/jokes/historico", "status": "done", "priority": "medium", "complejidad": "baja", "depends_on": [17] },
   { "id": 19, "title": "Flujo C: segmentador.py — diseño del prompt de inicio de setup (juicio semántico, sin loop, revisión humana muestral)", "module": "src/jokes/historico", "status": "pending", "priority": "medium", "complejidad": "alta", "depends_on": [17, 13] },
   { "id": 20, "title": "scripts/validate_corpus.py operativo como gate previo a cada commit", "module": "scripts", "status": "done", "priority": "high", "complejidad": "media", "depends_on": [11] },
-  { "id": 21, "title": "Ingesta de /data/processed/v{N}/ a Supabase (teoria_chunks + índice pgvector compartido)", "module": "src/theory", "status": "pending", "priority": "medium", "complejidad": "media", "depends_on": [11, 12] }
+  { "id": 21, "title": "Ingesta de /data/processed/v{N}/ a Supabase (teoria_chunks + índice pgvector compartido)", "module": "src/theory", "status": "done", "priority": "medium", "complejidad": "media", "depends_on": [11, 12] }
 ]
