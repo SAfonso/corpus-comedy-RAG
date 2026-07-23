@@ -44,6 +44,16 @@
       "task_id": 21,
       "decision": "No se parsea el YAML frontmatter de vuelta (no se añade pyyaml): teoria_chunks no tiene columnas de subtipo/idioma por fragmento, solo tipo_fuente/licencia que ya están en manifest.json. _separar_cuerpo solo separa cabecera/cuerpo por el delimitador '---' fijo que emite render_document, sin parsear el contenido YAML en sí.",
       "reason": "format_normalizer.py (task 11) documentó explícitamente que parsear YAML de vuelta sería una decisión de stack aparte si hiciera falta — no hace falta para el esquema real de teoria_chunks, así que no se toma esa decisión todavía."
+    },
+    {
+      "task_id": 19,
+      "decision": "El LLM devuelve el fragmento LITERAL de texto donde empieza el setup (texto_inicio_setup), no un offset numérico de carácter. Si el fragmento no se localiza en la ventana candidata (alucinación), fallback conservador sin reintentar: se usa la ventana completa y se marca inicio_localizado=False como señal para revisión humana muestral, sin descartar el chiste ni abortar el documento.",
+      "reason": "un offset numérico es casi imposible de validar (cualquier entero en rango 'parece' válido); un fragmento literal es verificable barato (str.find, con tolerancia a espaciado). El material histórico es sagrado — ante una respuesta mala del LLM, perder contenido real es peor que incluir de más una cola de intro."
+    },
+    {
+      "task_id": 19,
+      "decision": "El fin de cada chiste (nº de chistes = nº de [REMATE]) se detecta por regex determinista, NO por el LLM; el LLM solo decide el inicio del setup dentro de la ventana entre el remate anterior y este. [CHISTOIDE] se conserva como metadato de estructura, nunca como frontera.",
+      "reason": "coincide exactamente con el contrato de src/jokes/historico/SPEC.md §Segmentador: el [REMATE] es determinista por diseño de marcar_remates.py (task 17), solo el arranque del setup es juicio semántico sin ancla externa (motivo por el que este paso, a diferencia de Taxonomías/Reconciliación, no lleva loop P16)."
     }
   ],
   "tasks": [
@@ -66,6 +76,13 @@
       "title": "Ingesta de /data/processed/v{N}/ a Supabase (teoria_chunks + índice pgvector compartido)",
       "status": "done",
       "summary": "Implementados src/theory/teoria_store.py (cliente Supabase propio de teoría, sin importar src/jokes/) y src/theory/ingest_teoria.py (ingestar_version: lee manifest.json + .txt de v{N}/, un chunk por fragmento, resuelve/crea fuente, embedding vía src/utils/llm/embeddings.py ya existente de la task 15, upsert idempotente). Añadidos chunk_index + unique(doc_id, version_corpus, chunk_index) a teoria_chunks en schema.sql. 14 tests unitarios nuevos (cadena real de Flujo A -> v1 real en tmp_path, sin red) + 1 test de integración (skip esperado: columna nueva pendiente de aplicar en Supabase, PGRST204 documentado en docs/specs/KNOWN_ERRORS_GLOBAL.md — hallazgo nuevo). 308/308 tests unitarios del repo en verde. Branch task/21-ingesta-teoria.",
+      "rejections": 0
+    },
+    {
+      "id": 19,
+      "title": "Flujo C: segmentador.py — diseño del prompt de inicio de setup (juicio semántico, sin loop, revisión humana muestral)",
+      "status": "done",
+      "summary": "Delegada a subagente Opus en worktree aislado (complejidad alta). Implementado src/jokes/historico/segmentador.py: _construir_ventanas (frontera por [REMATE], determinista, regex pura) + segmentar_documento (una llamada LLM por remate, sin loop P16, localiza el inicio literal del setup con fallback conservador ante alucinación — ver decisiones arriba). 29 tests unitarios (fixtures reales de Freskito-Informático.md) + 1 test de integración real contra Gemini, todos en verde. Revisado por el leader: branch basada en main desactualizado (previo al merge de la task 21) pero sin overlap de ficheros — merge limpio verificado localmente (337/337 unit tests, 11 passed/3 skipped integración) antes de mergear. Branch task/19-segmentador. Backlog completo: 21/21.",
       "rejections": 0
     }
   ]

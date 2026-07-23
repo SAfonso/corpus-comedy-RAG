@@ -6,21 +6,25 @@
 ![markitdown](https://img.shields.io/badge/markitdown-PDF%2FDOCX%E2%86%92MD-000000?style=flat-square&logo=microsoft&logoColor=white)
 ![DeepL](https://img.shields.io/badge/DeepL-translation-0F2B46?style=flat-square)
 ![pytest](https://img.shields.io/badge/tested%20with-pytest-0A9EDC?style=flat-square&logo=pytest&logoColor=white)
-![Estado](https://img.shields.io/badge/status-20%2F21%20tareas%20%E2%80%94%20en%20progreso-yellow?style=flat-square)
+![Estado](https://img.shields.io/badge/status-21%2F21%20tareas%20%E2%80%94%20backlog%20cerrado-brightgreen?style=flat-square)
 
 > Pipeline de **ingesta, limpieza, estructuración y versionado** de datos para el
 > **Comedy RAG**. Corpus **multi-fuente**: cada unidad lleva `tipo_fuente` para
 > permitir *retrieval* separado por origen en el RAG *downstream*.
 
-**Estado:** 20/21 tareas del backlog cerradas (ver [`feature_list.json`](feature_list.json)).
+**Estado:** 21/21 tareas del backlog cerradas (ver [`feature_list.json`](feature_list.json)).
+Los scripts de orquestación end-to-end por flujo (`scripts/run_pipeline.py`,
+conectividad real de Telegram) quedan fuera del backlog atómico — ver nota en
+cada flujo.
 - **Flujo A (Teoría):** completo — los 8 componentes de la cadena implementados
   y testeados (`DriveMonitor` → ... → `FormatNormalizer` → `/data/processed/v{N}/`),
   más `validate_corpus.py` como gate de validación.
 - **Contrato compartido B/C:** `supabase_store.py` + DDL, `silver.py` (LLM), el
   mapeo de taxonomías (loop acotado P16) y `reconciliacion.py` (dedup
   hash+embedding, task 15) implementados.
-- **Flujo C (Histórico):** `marcar_remates.py` y `loader.py` implementados; falta
-  `segmentador.py` (task 19).
+- **Flujo C (Histórico):** completo — `marcar_remates.py`, `loader.py` y
+  `segmentador.py` (frontera determinista por `[REMATE]`, inicio de setup por
+  LLM sin loop, task 19) implementados.
 - **Flujo B (Telegram):** `telegram_bot.py` implementado (Bronze inmutable,
   idempotencia por `telegram_update_id`, pre-limpieza mínima, task 16); la
   conexión real con la API de Telegram (polling/webhook) queda para el script
