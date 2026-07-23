@@ -10,8 +10,21 @@
 -- EXTENSION) contra esa API REST estándar. Este fichero se aplica a mano en
 -- el SQL Editor del dashboard de Supabase (Project → SQL Editor → pegar y
 -- ejecutar), o vía una herramienta de migraciones si se adopta más adelante.
--- Es idempotente (`IF NOT EXISTS` en extensión y tablas) para poder
--- reejecutarlo sin duplicar nada.
+-- Es idempotente SOLO para crear lo que todavía no existe (`IF NOT EXISTS`
+-- en extensión y tablas) — reejecutar el fichero completo nunca duplica una
+-- tabla ni falla si ya está creada.
+--
+-- OJO — esto NO cubre ampliar una tabla que YA existe (columna o constraint
+-- nuevos añadidos en una task posterior a la que creó la tabla):
+-- `create table if not exists` comprueba solo si la tabla existe, nunca
+-- diffea sus columnas contra la definición de abajo — si la tabla ya está
+-- creada, la sentencia es un no-op completo y la columna nueva NO se añade
+-- (confirmado: `teoria_chunks.chunk_index`, task 21, quedó sin crear tras
+-- "reaplicar schema.sql" hasta correr un `ALTER TABLE` aparte — ver
+-- `docs/specs/KNOWN_ERRORS_GLOBAL.md`). Toda task que amplíe una tabla
+-- preexistente debe entregar el `ALTER TABLE` explícito (en el PR/reporte,
+-- no solo actualizar la definición de aquí) además de mantener este fichero
+-- como documentación del esquema deseado final.
 --
 -- Orden de creación: tablas de taxonomía primero (temas, tecnicas, fuentes)
 -- porque `chistes` las referencia por FK; `chistes_revisiones` y

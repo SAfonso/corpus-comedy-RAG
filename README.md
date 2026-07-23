@@ -13,6 +13,11 @@
 > permitir *retrieval* separado por origen en el RAG *downstream*.
 
 **Estado:** 21/21 tareas del backlog cerradas (ver [`feature_list.json`](feature_list.json)).
+`schema.sql` está aplicado por completo en el proyecto Supabase real
+(incluida la ampliación de `teoria_chunks`/`chistes_telegram_bronze` de las
+tasks 16/21 — ver nota de `ALTER TABLE` en la cabecera de `schema.sql` para
+próximas ampliaciones de tablas ya existentes) y `pytest tests/integration -v`
+pasa de verdad contra Supabase + Gemini (13 passed, 1 skip ajeno — DeepL).
 Los scripts de orquestación end-to-end por flujo (`scripts/run_pipeline.py`,
 conectividad real de Telegram) quedan fuera del backlog atómico — ver nota en
 cada flujo.
