@@ -120,11 +120,13 @@ create table if not exists candidatos_taxonomia (
 
 create table if not exists teoria_chunks (
   id             uuid primary key default gen_random_uuid(),
-  doc_id         text,
+  doc_id         text,                              -- path relativo dentro de v{N}/ (manifest.json)
   version_corpus text,                              -- v{N} de procedencia (src/theory/SPEC.md)
+  chunk_index    int,                                -- posición del fragmento dentro del documento (task 21)
   contenido      text,
   embedding      vector,
   tipo_fuente    text,
   fuente_id      bigint references fuentes(id),
-  licencia       text default 'personal_only'
+  licencia       text default 'personal_only',
+  unique (doc_id, version_corpus, chunk_index)        -- idempotencia de reingesta (task 21)
 );
