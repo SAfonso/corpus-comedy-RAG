@@ -84,6 +84,22 @@ create table if not exists chistes_revisiones (
 );
 
 -- ---------------------------------------------------------------------------
+-- Bronze de Telegram (Flujo B, task 16, telegram/SPEC.md §Bronze) — captura
+-- literal e inmutable de cada mensaje, equivalente a /data/raw/ para teoría.
+-- Solo esta tabla (no `chistes`) tiene idempotencia por evento vía UNIQUE en
+-- telegram_update_id + upsert con ignore_duplicates (ON CONFLICT DO NOTHING).
+-- ---------------------------------------------------------------------------
+
+create table if not exists chistes_telegram_bronze (
+  id                 uuid primary key default gen_random_uuid(),
+  telegram_update_id bigint not null unique,        -- idempotencia por evento (§Bronze)
+  chat_id            bigint,
+  texto_raw          text not null,                 -- literal, sagrado, nunca se reescribe
+  timestamp_telegram timestamptz,                   -- fecha del mensaje según Telegram
+  created_at         timestamptz not null default now()
+);
+
+-- ---------------------------------------------------------------------------
 -- Cola de revisión humana para taxonomía sin match (§Taxonomías)
 -- ---------------------------------------------------------------------------
 

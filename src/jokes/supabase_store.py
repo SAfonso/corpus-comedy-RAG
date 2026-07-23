@@ -3,10 +3,14 @@
 Contrato (`src/jokes/SPEC.md` §Storage): los chistes viven nativos en
 Supabase (Postgres + `pgvector`), a diferencia de teoría (ficheros `v{N}`).
 Este módulo es el ÚNICO punto de acceso a las tablas `chistes`,
-`chistes_revisiones`, `temas`, `tecnicas`, `fuentes` y
-`candidatos_taxonomia` — usado igual desde Flujo B (Telegram) y Flujo C
-(Histórico), igual que `silver.py`/`reconciliacion.py` (ver docstring de
-`src/jokes/SPEC.md`). `teoria_chunks` NO se expone aquí (scope de la task 21,
+`chistes_revisiones`, `temas`, `tecnicas`, `fuentes`,
+`candidatos_taxonomia` y `chistes_telegram_bronze` — usado igual desde Flujo
+B (Telegram) y Flujo C (Histórico), igual que `silver.py`/`reconciliacion.py`
+(ver docstring de `src/jokes/SPEC.md`). `chistes_telegram_bronze` es la única
+excepción de uso exclusivo-Flujo-B (task 16, `telegram/SPEC.md` §Bronze) —
+vive aquí en vez de en `telegram_bot.py` para mantener la regla "un único
+punto de acceso a Supabase" sin excepciones, aunque hoy solo tenga un
+caller. `teoria_chunks` NO se expone aquí (scope de la task 21,
 ingesta de teoría) aunque su DDL vive en el mismo `schema.sql` por
 comodidad — este módulo tampoco importa nada de `src/theory/` (regla de
 `CLAUDE.md`: `theory/` y `jokes/` no se importan entre sí).
@@ -249,6 +253,32 @@ def _build_candidato_update_payload(estado: str) -> dict:
     return {"estado": estado}
 
 
+def _build_mensaje_telegram_bronze_payload(
+    *,
+    telegram_update_id: int,
+    texto_raw: str,
+    chat_id: Optional[int] = None,
+    timestamp_telegram: Optional[str] = None,
+) -> dict:
+    """Construye el payload de upsert para `chistes_telegram_bronze` (task 16, §Bronze).
+
+    `telegram_update_id` y `texto_raw` son obligatorios (un `TypeError` de
+    Python al faltar uno es preferible a un upsert silencioso incompleto,
+    mismo criterio que `_build_chiste_payload`). `chat_id`/`timestamp_telegram`
+    son opcionales y se omiten del payload si no se dan, para que aplique el
+    default de la DDL (`NULL`) en vez de forzar `None` explícito.
+    """
+    payload: dict[str, Any] = {
+        "telegram_update_id": telegram_update_id,
+        "texto_raw": texto_raw,
+    }
+    if chat_id is not None:
+        payload["chat_id"] = chat_id
+    if timestamp_telegram is not None:
+        payload["timestamp_telegram"] = timestamp_telegram
+    return payload
+
+
 # ---------------------------------------------------------------------------
 # Cliente Supabase — capa fina sobre supabase-py. Solo habla con tablas ya
 # existentes (ver docstring del módulo); nunca ejecuta DDL.
@@ -377,3 +407,22 @@ class SupabaseStore:
             .execute()
         )
         return resultado.data[0]
+
+    # -- chistes_telegram_bronze (Flujo B, task 16, §Bronze) --------------
+
+    def guardar_mensaje_telegram_bronze(self, **kwargs) -> Optional[dict]:
+        """Upsert idempotente por `telegram_update_id` (`ON CONFLICT DO NOTHING`).
+
+        `ignore_duplicates=True` hace que un evento ya visto (reenvío/retry
+        del webhook) no falle ni sobrescriba la fila `texto_raw` ya guardada
+        (Bronze es sagrado, §Bronze) — simplemente no devuelve fila. Por eso
+        el retorno es `Optional[dict]`: `None` significa "ya existía, no se
+        tocó nada" (duplicado correctamente ignorado), no un error.
+        """
+        payload = _build_mensaje_telegram_bronze_payload(**kwargs)
+        resultado = (
+            self.client.table("chistes_telegram_bronze")
+            .upsert(payload, on_conflict="telegram_update_id", ignore_duplicates=True)
+            .execute()
+        )
+        return resultado.data[0] if resultado.data else None

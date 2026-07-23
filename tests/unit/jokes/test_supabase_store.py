@@ -18,6 +18,7 @@ from src.jokes.supabase_store import (
     _build_candidato_update_payload,
     _build_chiste_payload,
     _build_chiste_update_payload,
+    _build_mensaje_telegram_bronze_payload,
     _build_revision_payload,
     _validar_estado_candidato,
     _validar_estado_chiste,
@@ -276,3 +277,34 @@ def test_build_candidato_update_payload_valido():
 def test_build_candidato_update_payload_rechaza_estado_invalido():
     with pytest.raises(ValueError, match="estado inválido"):
         _build_candidato_update_payload("en_revision")
+
+
+# ---------------------------------------------------------------------------
+# _build_mensaje_telegram_bronze_payload (Flujo B, task 16, §Bronze)
+# ---------------------------------------------------------------------------
+
+def test_build_mensaje_telegram_bronze_payload_minimo_omite_opcionales():
+    payload = _build_mensaje_telegram_bronze_payload(
+        telegram_update_id=100, texto_raw="un chiste"
+    )
+    assert payload == {"telegram_update_id": 100, "texto_raw": "un chiste"}
+
+
+def test_build_mensaje_telegram_bronze_payload_completo():
+    payload = _build_mensaje_telegram_bronze_payload(
+        telegram_update_id=100,
+        texto_raw="un chiste",
+        chat_id=555,
+        timestamp_telegram="2023-07-22T04:26:40+00:00",
+    )
+    assert payload == {
+        "telegram_update_id": 100,
+        "texto_raw": "un chiste",
+        "chat_id": 555,
+        "timestamp_telegram": "2023-07-22T04:26:40+00:00",
+    }
+
+
+def test_build_mensaje_telegram_bronze_payload_requiere_campos_obligatorios():
+    with pytest.raises(TypeError):
+        _build_mensaje_telegram_bronze_payload(texto_raw="un chiste")  # falta telegram_update_id

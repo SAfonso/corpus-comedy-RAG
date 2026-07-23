@@ -21,7 +21,10 @@
   hash+embedding, task 15) implementados.
 - **Flujo C (Histórico):** `marcar_remates.py` y `loader.py` implementados; falta
   `segmentador.py` (task 19).
-- **Flujo B (Telegram):** pendiente (`telegram_bot.py`, task 16).
+- **Flujo B (Telegram):** `telegram_bot.py` implementado (Bronze inmutable,
+  idempotencia por `telegram_update_id`, pre-limpieza mínima, task 16); la
+  conexión real con la API de Telegram (polling/webhook) queda para el script
+  de orquestación del flujo.
 - **Ingesta de teoría a Supabase** (`teoria_chunks`, task 21): pendiente.
 
 **Metodología:** SDD estricto (spec → tests con fixtures reales → implementación).
