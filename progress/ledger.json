@@ -24,6 +24,36 @@
       "task_id": 16,
       "decision": "Se añadió la tabla chistes_telegram_bronze a schema.sql (antes solo existían chistes/chistes_revisiones/temas/tecnicas/fuentes/candidatos_taxonomia/teoria_chunks) y un método guardar_mensaje_telegram_bronze en supabase_store.py (upsert con on_conflict=telegram_update_id, ignore_duplicates=True).",
       "reason": "el SPEC de Telegram exige persistencia Bronze idempotente en Supabase (no hay ficheros locales como en Flujo A/C) — no existía ninguna tabla ni método previos para eso. Igual que las tablas de la task 12, requiere aplicación manual del schema.sql actualizado en el dashboard de Supabase; el test de integración hace skip con PGRST205 hasta entonces (comportamiento esperado, no una regresión)."
+    },
+    {
+      "task_id": 19,
+      "decision": "Delegada a un subagente en worktree aislado con modelo Opus (complejidad 'alta' según feature_list.json: diseño de prompt/juicio semántico), en paralelo a la task 21 hecha directamente en el árbol de trabajo principal. El leader revisa el diff antes de mergear.",
+      "reason": "política de tiering de modelos de CLAUDE.md (alta -> modelo potente); el worktree evita colisión de checkout con la task 21 corriendo en paralelo en el mismo repo."
+    },
+    {
+      "task_id": 21,
+      "decision": "teoria_store.py es un cliente Supabase propio de src/theory/ (no reusa src/jokes/supabase_store.py) pese a acceder a las mismas tablas fuentes/teoria_chunks.",
+      "reason": "regla dura de CLAUDE.md: theory/ y jokes/ nunca se importan entre sí. La duplicación de credenciales/cliente es el coste aceptado de mantener los flujos desacoplados."
+    },
+    {
+      "task_id": 21,
+      "decision": "Un chunk de teoria_chunks = un FRAGMENTO ya producido por LanguageNormalizer/SubtypeDetector (no se re-divide el texto por tamaño de token). Se añadió chunk_index a teoria_chunks (antes no existía) + unique(doc_id, version_corpus, chunk_index) para idempotencia de reingesta, con upsert ON CONFLICT DO NOTHING (mismo patrón que Bronze de Telegram, task 16).",
+      "reason": "un fragmento ya es la unidad semántica más fina que produce la cadena de Flujo A; partir más fino no está pedido por el SPEC y sería una decisión de tamaño de chunk arbitraria (BISTURÍ: mínimo viable). v{N} es inmutable, así que reingestar la misma versión debe ser un no-op determinista."
+    },
+    {
+      "task_id": 21,
+      "decision": "No se parsea el YAML frontmatter de vuelta (no se añade pyyaml): teoria_chunks no tiene columnas de subtipo/idioma por fragmento, solo tipo_fuente/licencia que ya están en manifest.json. _separar_cuerpo solo separa cabecera/cuerpo por el delimitador '---' fijo que emite render_document, sin parsear el contenido YAML en sí.",
+      "reason": "format_normalizer.py (task 11) documentó explícitamente que parsear YAML de vuelta sería una decisión de stack aparte si hiciera falta — no hace falta para el esquema real de teoria_chunks, así que no se toma esa decisión todavía."
+    },
+    {
+      "task_id": 19,
+      "decision": "El LLM devuelve el fragmento LITERAL de texto donde empieza el setup (texto_inicio_setup), no un offset numérico de carácter. Si el fragmento no se localiza en la ventana candidata (alucinación), fallback conservador sin reintentar: se usa la ventana completa y se marca inicio_localizado=False como señal para revisión humana muestral, sin descartar el chiste ni abortar el documento.",
+      "reason": "un offset numérico es casi imposible de validar (cualquier entero en rango 'parece' válido); un fragmento literal es verificable barato (str.find, con tolerancia a espaciado). El material histórico es sagrado — ante una respuesta mala del LLM, perder contenido real es peor que incluir de más una cola de intro."
+    },
+    {
+      "task_id": 19,
+      "decision": "El fin de cada chiste (nº de chistes = nº de [REMATE]) se detecta por regex determinista, NO por el LLM; el LLM solo decide el inicio del setup dentro de la ventana entre el remate anterior y este. [CHISTOIDE] se conserva como metadato de estructura, nunca como frontera.",
+      "reason": "coincide exactamente con el contrato de src/jokes/historico/SPEC.md §Segmentador: el [REMATE] es determinista por diseño de marcar_remates.py (task 17), solo el arranque del setup es juicio semántico sin ancla externa (motivo por el que este paso, a diferencia de Taxonomías/Reconciliación, no lleva loop P16)."
     }
   ],
   "tasks": [
@@ -39,6 +69,20 @@
       "title": "Flujo B: telegram_bot.py — Bronze inmutable, idempotencia por telegram_update_id, pre-limpieza mínima",
       "status": "done",
       "summary": "Implementado src/jokes/telegram/telegram_bot.py (limpiar_texto_telegram, _extraer_datos_mensaje, procesar_mensaje_telegram) contra un `update` con la forma del JSON de la Bot API de Telegram, sin dependencia del SDK. Añadidos chistes_telegram_bronze a schema.sql y guardar_mensaje_telegram_bronze a supabase_store.py (upsert idempotente, ON CONFLICT DO NOTHING real). 40 tests unitarios nuevos (0 red) + 1 test de integración (skip esperado: tabla nueva, pendiente de aplicar schema.sql en Supabase). Conectividad real con Telegram fuera de scope — ver decisión arriba. Branch task/16-telegram-bot.",
+      "rejections": 0
+    },
+    {
+      "id": 21,
+      "title": "Ingesta de /data/processed/v{N}/ a Supabase (teoria_chunks + índice pgvector compartido)",
+      "status": "done",
+      "summary": "Implementados src/theory/teoria_store.py (cliente Supabase propio de teoría, sin importar src/jokes/) y src/theory/ingest_teoria.py (ingestar_version: lee manifest.json + .txt de v{N}/, un chunk por fragmento, resuelve/crea fuente, embedding vía src/utils/llm/embeddings.py ya existente de la task 15, upsert idempotente). Añadidos chunk_index + unique(doc_id, version_corpus, chunk_index) a teoria_chunks en schema.sql. 14 tests unitarios nuevos (cadena real de Flujo A -> v1 real en tmp_path, sin red) + 1 test de integración (skip esperado: columna nueva pendiente de aplicar en Supabase, PGRST204 documentado en docs/specs/KNOWN_ERRORS_GLOBAL.md — hallazgo nuevo). 308/308 tests unitarios del repo en verde. Branch task/21-ingesta-teoria.",
+      "rejections": 0
+    },
+    {
+      "id": 19,
+      "title": "Flujo C: segmentador.py — diseño del prompt de inicio de setup (juicio semántico, sin loop, revisión humana muestral)",
+      "status": "done",
+      "summary": "Delegada a subagente Opus en worktree aislado (complejidad alta). Implementado src/jokes/historico/segmentador.py: _construir_ventanas (frontera por [REMATE], determinista, regex pura) + segmentar_documento (una llamada LLM por remate, sin loop P16, localiza el inicio literal del setup con fallback conservador ante alucinación — ver decisiones arriba). 29 tests unitarios (fixtures reales de Freskito-Informático.md) + 1 test de integración real contra Gemini, todos en verde. Revisado por el leader: branch basada en main desactualizado (previo al merge de la task 21) pero sin overlap de ficheros — merge limpio verificado localmente (337/337 unit tests, 11 passed/3 skipped integración) antes de mergear. Branch task/19-segmentador. Backlog completo: 21/21.",
       "rejections": 0
     }
   ]
