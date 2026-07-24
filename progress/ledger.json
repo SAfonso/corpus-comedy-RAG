@@ -69,6 +69,16 @@
       "task_id": 22,
       "decision": "tipo_fuente se infiere de la extensión del fichero de origen (.txt WhisperX -> transcripcion_curso, .pdf/.docx/.epub -> teoria) y `fuente` se deriva del nombre de fichero (stem, guiones/guiones bajos a espacios) — placeholders documentados en pipeline.py hasta que la integración real de Drive (P18, diferida) aporte metadatos propios (título, autor) por documento.",
       "reason": "ningún componente previo de la cadena produce estos metadatos de documento (format_normalizer.DocumentoEntrada los exige explícitos), y hoy no hay ninguna otra fuente de verdad disponible sin reactivar Drive real, fuera de scope de esta tarea."
+    },
+    {
+      "task_id": 29,
+      "decision": "Flujo C SÍ activa Drive real (dirección OPUESTA a P18 de teoría, que lo difiere): componente nuevo `src/jokes/historico/drive_source.py` con contrato `DriveSource(folder_id, staging_dir, state_path, credentials_path=None).sync() -> list[Path]` (simétrico a `Loader`), que lista la carpeta Drive, descarga a staging local solo los .docx nuevos/modificados y devuelve sus paths locales para `marcar_remates.procesar_docx(...)` SIN tocar su firma. Idempotencia de Drive por metadata `fileId` + `modifiedTime` (no MD5: modifiedTime se lee sin descargar, evita la descarga misma). Idempotencia EN CAPAS e INDEPENDIENTE: Drive (qué .docx bajar) / marcar_remates (--no-sobrescribir) / Loader (MD5 del .md), cada una con su propio state_path, ninguna asume el estado de otra. Google Docs nativos se exportan a .docx (conserva w:color de run que necesita marcar_remates; export a md/txt lo perdería).",
+      "reason": "el histórico crece en Drive y su run será semanal y desatendido (GitHub Actions, task 31) — no hay nadie que copie .docx a mano como sí ocurre con los libros ya descargados de teoría (P18). El envoltorio por fuera de marcar_remates/Loader respeta que ambos son contratos ya aprobados (tasks 17/18) y no se tocan."
+    },
+    {
+      "task_id": 29,
+      "decision": "Variable de entorno propia para el folder ID del histórico: `DRIVE_FOLDER_ID_HISTORICO`, separada de `DRIVE_FOLDER_ID` (carpeta de teoría). Las credenciales SÍ se comparten: misma cuenta de servicio vía `GOOGLE_APPLICATION_CREDENTIALS` (scope drive.readonly), auth desatendida compatible con CI (nunca OAuth interactivo). P asignado: P19.",
+      "reason": "son carpetas de Drive distintas (confundirlas si comparten variable), pero un solo service account del mismo proyecto Google puede leer ambas; separar solo el folder ID es el mínimo necesario. La restricción de auth desatendida viene de la task 31 (trigger semanal en runner de GitHub Actions)."
     }
   ],
   "tasks": [
@@ -105,6 +115,13 @@
       "title": "Flujo A: theory/pipeline.py — módulo orquestador importable (DriveMonitor→Parser→SubtypeDetector→Cleaner→Language→QualityScorer→generar_version), reanudación por processed_files.json",
       "status": "done",
       "summary": "Implementado src/theory/pipeline.py: run_pipeline encadena DriveMonitor -> Parser (dispatch por extensión: .txt whisperx, .pdf/.docx/.epub markitdown) -> SubtypeDetector -> Cleaner -> LanguageNormalizer -> generar_version (QualityScorer ya embebido en generar_version, no se repite). Fricción resuelta: DriveMonitor.scan() persiste el hash MD5 de un fichero en processed_files.json en cuanto lo detecta pendiente, no cuando termina de procesarse — pipeline.py revierte esa escritura prematura (mismo fichero JSON, contrato externo documentado, sin tocar drive_monitor.py) y solo confirma el hash de cada fichero tras completar la cadena entera con éxito hasta generar_version; si generar_version falla, ningún fichero del batch se marca. 11 tests unitarios nuevos con fixtures reales (sample_transcript.txt/.pdf): cadena feliz, fallo a mitad de cadena no marca el fichero, reanudación tras fallo previo, fallo en generar_version no marca nada del batch, ficheros sin Parser conocido (.gitkeep) ignorados sin reintento. 346/346 tests unitarios en verde (2 errores preexistentes ajenos: datos privados no presentes en el worktree). Branch task/22-theory-pipeline-orquestador.",
+      "rejections": 0
+    },
+    {
+      "id": 29,
+      "title": "Flujo C: spec de integración Drive real (jokes/historico/SPEC.md + nota en 00-overview.md) — fuente pasa de .docx local a carpeta Drive real, descarga a staging local, marcar_remates conserva firma local",
+      "status": "done",
+      "summary": "Tarea de SPEC (sin código). Documentado en src/jokes/historico/SPEC.md el nuevo contrato de entrada del Flujo C: nueva §Fuente de entrada — carpeta Drive real (P19) con el contrato de `drive_source.py` (implementación en task 30), idempotencia por metadata de Drive (fileId+modifiedTime) e idempotencia EN CAPAS independiente (Drive/marcar_remates/Loader). Etapas renumeradas (DriveSource=etapa 0), marcar_remates.procesar_docx y Loader intactos. Añadida decisión P19 en docs/specs/00-overview.md (header + comparativa de idempotencia). .env.example: nueva variable DRIVE_FOLDER_ID_HISTORICO (credenciales GOOGLE_APPLICATION_CREDENTIALS compartidas con teoría, service account, scope drive.readonly, auth desatendida para CI). Contrato exacto para la task 30: DriveSource(folder_id, staging_dir, state_path, credentials_path=None).sync()->list[Path]. Sin tocar marcar_remates.py/loader.py; Flujo A P18 intacto. 63/63 tests de Flujo C en verde (los 8 errores de colección del suite completo son deps ausentes en el worktree: markitdown, preexistentes y ajenos). Branch task/29-spec-drive-historico, PR #19 merged a main.",
       "rejections": 0
     }
   ]
