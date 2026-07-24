@@ -54,6 +54,21 @@
       "task_id": 19,
       "decision": "El fin de cada chiste (nº de chistes = nº de [REMATE]) se detecta por regex determinista, NO por el LLM; el LLM solo decide el inicio del setup dentro de la ventana entre el remate anterior y este. [CHISTOIDE] se conserva como metadato de estructura, nunca como frontera.",
       "reason": "coincide exactamente con el contrato de src/jokes/historico/SPEC.md §Segmentador: el [REMATE] es determinista por diseño de marcar_remates.py (task 17), solo el arranque del setup es juicio semántico sin ancla externa (motivo por el que este paso, a diferencia de Taxonomías/Reconciliación, no lleva loop P16)."
+    },
+    {
+      "task_id": 22,
+      "decision": "processed_files.json se trata como el contrato EXTERNO de DriveMonitor (mismo formato JSON {nombre: {md5}}), no como su API privada: pipeline.py lee/revierte/escribe ese fichero directamente en vez de tocar drive_monitor.py. Tras cada DriveMonitor.scan() (que ya persiste hashes de forma prematura, antes de procesar), pipeline.py revierte el fichero al último estado realmente comprometido y solo re-confirma los hashes de los ficheros que completaron la cadena entera con éxito.",
+      "reason": "la tarea prohibía tocar drive_monitor.py, pero su scan() marca 'visto' en el momento de detección, no de finalización — sin esta reconciliación, un fallo a mitad de cadena habría dejado el fichero marcado como procesado sin haberlo estado nunca, rompiendo el criterio de reanudación de src/theory/SPEC.md."
+    },
+    {
+      "task_id": 22,
+      "decision": "Un run de run_pipeline procesa el batch completo de ficheros pendientes y llama a generar_version UNA VEZ con todos los documentos que superaron la cadena — no una versión v{N} por fichero. Si generar_version falla, ningún fichero del batch se marca (todos se reintentan en el siguiente run); los ficheros que fallaron en etapas anteriores (Parser/Cleaner/Language) tampoco se incluyen en la llamada y quedan pendientes de forma independiente.",
+      "reason": "coincide con 'Flujo batch, 100% determinista' de src/theory/SPEC.md y evita crear una v{N} por cada fichero individual (ruido de versionado); generar_version ya tolera reintentar una versión no finalizada sin corromper nada (ver su propio docstring), así que un fallo ahí no deja estado a medias."
+    },
+    {
+      "task_id": 22,
+      "decision": "tipo_fuente se infiere de la extensión del fichero de origen (.txt WhisperX -> transcripcion_curso, .pdf/.docx/.epub -> teoria) y `fuente` se deriva del nombre de fichero (stem, guiones/guiones bajos a espacios) — placeholders documentados en pipeline.py hasta que la integración real de Drive (P18, diferida) aporte metadatos propios (título, autor) por documento.",
+      "reason": "ningún componente previo de la cadena produce estos metadatos de documento (format_normalizer.DocumentoEntrada los exige explícitos), y hoy no hay ninguna otra fuente de verdad disponible sin reactivar Drive real, fuera de scope de esta tarea."
     }
   ],
   "tasks": [
@@ -83,6 +98,13 @@
       "title": "Flujo C: segmentador.py — diseño del prompt de inicio de setup (juicio semántico, sin loop, revisión humana muestral)",
       "status": "done",
       "summary": "Delegada a subagente Opus en worktree aislado (complejidad alta). Implementado src/jokes/historico/segmentador.py: _construir_ventanas (frontera por [REMATE], determinista, regex pura) + segmentar_documento (una llamada LLM por remate, sin loop P16, localiza el inicio literal del setup con fallback conservador ante alucinación — ver decisiones arriba). 29 tests unitarios (fixtures reales de Freskito-Informático.md) + 1 test de integración real contra Gemini, todos en verde. Revisado por el leader: branch basada en main desactualizado (previo al merge de la task 21) pero sin overlap de ficheros — merge limpio verificado localmente (337/337 unit tests, 11 passed/3 skipped integración) antes de mergear. Branch task/19-segmentador. Backlog completo: 21/21.",
+      "rejections": 0
+    },
+    {
+      "id": 22,
+      "title": "Flujo A: theory/pipeline.py — módulo orquestador importable (DriveMonitor→Parser→SubtypeDetector→Cleaner→Language→QualityScorer→generar_version), reanudación por processed_files.json",
+      "status": "done",
+      "summary": "Implementado src/theory/pipeline.py: run_pipeline encadena DriveMonitor -> Parser (dispatch por extensión: .txt whisperx, .pdf/.docx/.epub markitdown) -> SubtypeDetector -> Cleaner -> LanguageNormalizer -> generar_version (QualityScorer ya embebido en generar_version, no se repite). Fricción resuelta: DriveMonitor.scan() persiste el hash MD5 de un fichero en processed_files.json en cuanto lo detecta pendiente, no cuando termina de procesarse — pipeline.py revierte esa escritura prematura (mismo fichero JSON, contrato externo documentado, sin tocar drive_monitor.py) y solo confirma el hash de cada fichero tras completar la cadena entera con éxito hasta generar_version; si generar_version falla, ningún fichero del batch se marca. 11 tests unitarios nuevos con fixtures reales (sample_transcript.txt/.pdf): cadena feliz, fallo a mitad de cadena no marca el fichero, reanudación tras fallo previo, fallo en generar_version no marca nada del batch, ficheros sin Parser conocido (.gitkeep) ignorados sin reintento. 346/346 tests unitarios en verde (2 errores preexistentes ajenos: datos privados no presentes en el worktree). Branch task/22-theory-pipeline-orquestador.",
       "rejections": 0
     }
   ]
