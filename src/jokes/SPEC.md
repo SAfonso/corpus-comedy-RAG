@@ -94,6 +94,89 @@ similitud embedding < ~0.85             → NUEVO    → inserta chiste nuevo
 - Este mecanismo **ya cumple** el criterio de parada verificable de P16 sin
   cambios (hash/umbral son externos al LLM) — ver `docs/specs/llm-policy.md`.
 
+### Obtención de candidatos (`SupabaseStore.listar_candidatos_reconciliacion`)
+
+`reconciliacion.py` es agnóstico de Supabase **por diseño** (task 15): su
+`decidir_reconciliacion` / `reconciliar_chiste` reciben `candidatos` ya
+resuelto como argumento (`list[dict]`), lo que mantiene el módulo testeable
+sin red. **Quién obtiene esos `candidatos` es responsabilidad del caller vía
+`supabase_store.py`** — este es el método que cierra ese hueco (implementación:
+task 25).
+
+**Firma:**
+
+```python
+def listar_candidatos_reconciliacion(
+    self, tipo_fuente: str | Sequence[str]
+) -> list[dict]
+```
+
+- **Parámetro `tipo_fuente`** — uno o varios valores del enum
+  `TIPOS_FUENTE_CHISTE` (`propio` | `propio_historico`). Es el **caller** quien
+  decide el alcance de la comparación (regla heredada de la decisión de task 15;
+  ver la matriz de dedup de arriba): Flujo B (Telegram, `propio` entrante) y
+  Flujo C (Histórico, `propio_historico` entrante) comparan hoy contra
+  `propio_historico`. Aceptar también una secuencia deja abierto sin cambio de
+  firma un futuro `propio*` (comparar contra ambos) sin cablear esa política
+  dentro del método. Cada valor se valida contra el enum
+  (`_validar_tipo_fuente_chiste`, reutilizado) — un `tipo_fuente` fuera de enum
+  lanza `ValueError`, nunca degrada a query silenciosa.
+- **Retorno** — `list[dict]`, una entrada por fila de `chistes` cuyo
+  `tipo_fuente` cae en el alcance pedido, con **exactamente** las tres claves
+  que `decidir_reconciliacion` consume:
+
+  | Clave | Tipo | Uso en `decidir_reconciliacion` |
+  |---|---|---|
+  | `id` | `str` (uuid) | se copia a `ResultadoReconciliacion.chiste_id` (IGUAL/CAMBIADO) — **obligatoria** |
+  | `hash_normalizado` | `str \| None` | comparación de dedup exacto (`candidato.get("hash_normalizado")`) |
+  | `embedding` | `list[float] \| None` | similitud coseno; `None`/vacío se salta por entrada, no rompe |
+
+  El método hace `select("id, hash_normalizado, embedding")` — **solo esas tres
+  columnas**, no `select("*")`: minimiza transferencia y deja explícito el
+  contrato con `reconciliacion.py`.
+
+**El `embedding` se devuelve como `list[float]`** (no como el `text`/string que
+PostgREST puede entregar para una columna `vector`): `similitud_coseno` itera
+floats, así que si la fila trae el embedding serializado el método lo parsea a
+`list[float]` antes de devolverlo (o lo deja en `None` si la columna está
+vacía). Este es el único punto de adaptación entre la representación de pgvector
+y lo que `reconciliacion.py` espera.
+
+**Qué NO filtra (confirmado contra §Versionado y §Storage):**
+
+- **Sin filtro de versión.** Cada fila de `chistes` es un chiste lógico cuyo
+  `hash_normalizado`/`embedding` reflejan ya el contenido **vigente**
+  (`version_actual`); la historia de revisiones vive aparte en
+  `chistes_revisiones` (append-only) y **no** se consulta aquí. No hay, pues,
+  nada que deduplicar por número de versión.
+- **Variantes incluidas.** Una fila con `chiste_origen_id` no nulo es un chiste
+  **distinto** (reutilización de material, §Versionado), no una revisión: debe
+  poder ser candidato de reconciliación como cualquier otro. No se excluye.
+- **Sin auto-exclusión.** La reconciliación ocurre **antes** del INSERT, así que
+  un chiste entrante nuevo aún no está en `chistes`. En un reproceso idempotente,
+  el mismo texto hará hash-match con su propia fila ya insertada → decisión
+  IGUAL → dedup (no reinserta): ese es el resultado **deseado** (idempotencia),
+  no un falso positivo a evitar.
+
+**Trade-off — traer todo el `tipo_fuente` vs. ANN nativa de pgvector (decisión P20).**
+El método trae **todas** las filas del `tipo_fuente` y `reconciliacion.py`
+compara en Python (hash primero, luego coseno). La alternativa —una query ANN
+`ORDER BY embedding <-> :entrante LIMIT K` que devuelva solo los K más
+cercanos— **no** es compatible con el flujo actual sin tocar código congelado:
+`reconciliar_chiste` obtiene los `candidatos` **antes** de calcular el embedding
+del chiste entrante (el embedding se genera dentro de esa función, task 15, que
+no se toca), de modo que en el momento del fetch **no existe** el vector `:entrante`
+que la ANN necesita como query. Forzarlo obligaría a calcular el embedding fuera
+y volver a calcularlo dentro (doble coste, rompe el orden hash-primero) o a
+cambiar la interfaz de `decidir_reconciliacion` (prohibido). Dado el **bajo
+volumen** explícito del corpus (GraphRAG descartado justo por eso, ver
+`00-overview.md` §1), comparar en Python es más simple, determinista y 100%
+testeable sin red. La ANN queda como **optimización futura** viable cuando el
+volumen crezca: el método puede hacer el trabajo pesado en SQL y **seguir
+devolviendo `list[dict]`** (la interfaz de `decidir_reconciliacion` no cambia),
+pero requeriría reordenar el flujo para tener el embedding entrante disponible
+en el fetch — fuera del alcance de hoy.
+
 ## Limpieza, idioma y metadatos (chistes)
 
 **Limpieza:** Bronze raw + pre-limpieza mínima + normalización por LLM que

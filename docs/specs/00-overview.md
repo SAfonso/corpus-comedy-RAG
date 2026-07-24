@@ -3,8 +3,10 @@
 > **Estado:** v2 (multi-fuente) · **Metodología:** SDD — spec aprobada ANTES de
 > escribir código. **Documento vivo:** decisiones P1–P14, más P15 (marcado
 > histórico por color, 2026-07-06), P16 (loops LLM, 2026-07-09), P17
-> (markitdown para Parser de teoría, 2026-07-21) y P18 (DriveMonitor sobre
-> carpeta local, Drive API real diferida, 2026-07-22).
+> (markitdown para Parser de teoría, 2026-07-21), P18 (DriveMonitor sobre
+> carpeta local, Drive API real diferida, 2026-07-22) y P20 (candidatos de
+> reconciliación filtrados por `tipo_fuente`, 2026-07-24). P19 queda reservado
+> a una tarea concurrente del Flujo C (lectura desde carpeta Drive real).
 
 Este documento es el **punto de entrada**. La spec completa ya no vive en un solo
 fichero: está partida por módulo, colocada **dentro de `src/`**, junto al código
@@ -168,6 +170,24 @@ los flujos B y C porque tratan la misma unidad (`propio*`), pero no con teoría
   vez generado; nunca se sobrescribe una versión.
 - **Reanudación:** si cualquier flujo falla a mitad, retoma desde el último ítem
   no completado (fichero/documento/evento), sin reprocesar lo ya hecho.
+
+**P20 (2026-07-24) — Candidatos de reconciliación filtrados por `tipo_fuente`.**
+`reconciliacion.py` (task 15) es agnóstico de Supabase: recibe `candidatos`
+como argumento. El método que los obtiene vive en
+`SupabaseStore.listar_candidatos_reconciliacion(tipo_fuente)` (spec en
+`src/jokes/SPEC.md` §Reconciliación; implementación en task 25). Devuelve
+`list[dict]` con exactamente `id`/`hash_normalizado`/`embedding` (las tres
+claves que `decidir_reconciliacion` consume), una entrada por fila de `chistes`
+del alcance de `tipo_fuente` pedido — sin filtro de versión (cada fila ya es el
+contenido vigente; las revisiones viven en `chistes_revisiones`) y **con**
+variantes (`chiste_origen_id`, chistes distintos). Se decidió traer todas las
+filas del `tipo_fuente` y comparar en Python (hash → coseno) en vez de una query
+ANN nativa de pgvector: la ANN necesitaría el embedding entrante en el momento
+del fetch, pero `reconciliar_chiste` lo calcula **después** de obtener los
+candidatos (task 15, no se toca), y el volumen del corpus es bajo (GraphRAG
+descartado por lo mismo, §1). La ANN queda como optimización futura compatible
+con la interfaz (el método puede hacer el trabajo en SQL y seguir devolviendo
+`list[dict]`).
 
 ## Metodología SDD + TDD (aplica a todo el proyecto)
 
