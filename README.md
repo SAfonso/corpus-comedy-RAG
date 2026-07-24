@@ -6,24 +6,27 @@
 ![markitdown](https://img.shields.io/badge/markitdown-PDF%2FDOCX%E2%86%92MD-000000?style=flat-square&logo=microsoft&logoColor=white)
 ![DeepL](https://img.shields.io/badge/DeepL-translation-0F2B46?style=flat-square)
 ![pytest](https://img.shields.io/badge/tested%20with-pytest-0A9EDC?style=flat-square&logo=pytest&logoColor=white)
-![Estado](https://img.shields.io/badge/status-21%2F21%20tareas%20%E2%80%94%20backlog%20cerrado-brightgreen?style=flat-square)
+![Estado](https://img.shields.io/badge/status-22%2F31%20tareas%20%E2%80%94%20orquestador%20Flujo%20A-brightgreen?style=flat-square)
 
 > Pipeline de **ingesta, limpieza, estructuración y versionado** de datos para el
 > **Comedy RAG**. Corpus **multi-fuente**: cada unidad lleva `tipo_fuente` para
 > permitir *retrieval* separado por origen en el RAG *downstream*.
 
-**Estado:** 21/21 tareas del backlog cerradas (ver [`feature_list.json`](feature_list.json)).
-`schema.sql` está aplicado por completo en el proyecto Supabase real
-(incluida la ampliación de `teoria_chunks`/`chistes_telegram_bronze` de las
-tasks 16/21 — ver nota de `ALTER TABLE` en la cabecera de `schema.sql` para
-próximas ampliaciones de tablas ya existentes) y `pytest tests/integration -v`
-pasa de verdad contra Supabase + Gemini (13 passed, 1 skip ajeno — DeepL).
-Los scripts de orquestación end-to-end por flujo (`scripts/run_pipeline.py`,
-conectividad real de Telegram) quedan fuera del backlog atómico — ver nota en
-cada flujo.
+**Estado:** 22/31 tareas del backlog cerradas (ver [`feature_list.json`](feature_list.json));
+las 10 restantes son la ronda de orquestación end-to-end (tasks 23-31: CLIs
+estables, Flujo C completo, integración Drive real). `schema.sql` está
+aplicado por completo en el proyecto Supabase real (incluida la ampliación
+de `teoria_chunks`/`chistes_telegram_bronze` de las tasks 16/21 — ver nota
+de `ALTER TABLE` en la cabecera de `schema.sql` para próximas ampliaciones
+de tablas ya existentes) y `pytest tests/integration -v` pasa de verdad
+contra Supabase + Gemini (13 passed, 1 skip ajeno — DeepL).
 - **Flujo A (Teoría):** completo — los 8 componentes de la cadena implementados
   y testeados (`DriveMonitor` → ... → `FormatNormalizer` → `/data/processed/v{N}/`),
-  más `validate_corpus.py` como gate de validación.
+  más `validate_corpus.py` como gate de validación y `src/theory/pipeline.py`
+  (task 22) como orquestador importable de la cadena entera, con reanudación
+  por `processed_files.json` (un fichero solo se marca procesado tras
+  completar la cadena con éxito hasta `generar_version`). El CLI estable
+  (`scripts/run_pipeline.py`, task 23) queda fuera del backlog cerrado.
 - **Contrato compartido B/C:** `supabase_store.py` + DDL, `silver.py` (LLM), el
   mapeo de taxonomías (loop acotado P16) y `reconciliacion.py` (dedup
   hash+embedding, task 15) implementados.
