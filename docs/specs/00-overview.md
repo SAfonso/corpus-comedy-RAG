@@ -3,8 +3,9 @@
 > **Estado:** v2 (multi-fuente) · **Metodología:** SDD — spec aprobada ANTES de
 > escribir código. **Documento vivo:** decisiones P1–P14, más P15 (marcado
 > histórico por color, 2026-07-06), P16 (loops LLM, 2026-07-09), P17
-> (markitdown para Parser de teoría, 2026-07-21) y P18 (DriveMonitor sobre
-> carpeta local, Drive API real diferida, 2026-07-22).
+> (markitdown para Parser de teoría, 2026-07-21), P18 (DriveMonitor sobre
+> carpeta local, Drive API real diferida, 2026-07-22) y P19 (Flujo C lee de
+> carpeta Drive real vía `drive_source.py`, 2026-07-24).
 
 Este documento es el **punto de entrada**. La spec completa ya no vive en un solo
 fichero: está partida por módulo, colocada **dentro de `src/`**, junto al código
@@ -168,6 +169,22 @@ los flujos B y C porque tratan la misma unidad (`propio*`), pero no con teoría
   vez generado; nunca se sobrescribe una versión.
 - **Reanudación:** si cualquier flujo falla a mitad, retoma desde el último ítem
   no completado (fichero/documento/evento), sin reprocesar lo ya hecho.
+
+**P19 (2026-07-24) — Flujo C lee de carpeta Drive real.** A diferencia del
+Flujo A, cuya integración con Drive real está diferida sobre carpeta local
+(P18), el Flujo C **sí** consume una carpeta de Google Drive real vía un
+componente nuevo `src/jokes/historico/drive_source.py`: lista la carpeta,
+descarga a un *staging* local solo los `.docx` nuevos/modificados (idempotencia
+por metadata de Drive `fileId` + `modifiedTime`, **capa independiente** de la
+idempotencia MD5 del `Loader`) y los entrega a `marcar_remates.procesar_docx`
+**sin cambiar su firma**. Motivo: el histórico crece en Drive y su run será
+semanal y desatendido (GitHub Actions, task 31), sin nadie que copie `.docx` a
+mano. Auth por **cuenta de servicio** (`GOOGLE_APPLICATION_CREDENTIALS`, scope
+`drive.readonly`), nunca OAuth interactivo — compatible con CI. Folder ID
+propio del histórico en `DRIVE_FOLDER_ID_HISTORICO` (separado del
+`DRIVE_FOLDER_ID` de teoría; las credenciales sí se comparten). Detalle
+completo en [`src/jokes/historico/SPEC.md`](../../src/jokes/historico/SPEC.md)
+§Fuente de entrada — carpeta Drive real.
 
 ## Metodología SDD + TDD (aplica a todo el proyecto)
 
