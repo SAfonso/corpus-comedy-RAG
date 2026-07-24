@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Optional, Sequence, Union
 
 from dotenv import load_dotenv
 
@@ -113,6 +113,49 @@ def _validar_tipo_candidato(tipo: Optional[str]) -> Optional[str]:
 
 def _validar_estado_candidato(estado: Optional[str]) -> Optional[str]:
     return _validar_enum(estado, ESTADOS_CANDIDATO_TAXONOMIA, "estado")
+
+
+def _normalizar_tipo_fuente_candidatos(
+    tipo_fuente: Union[str, Sequence[str]]
+) -> list:
+    """Normaliza `tipo_fuente` (task 25, §Reconciliación) a `list[str]` validada.
+
+    `listar_candidatos_reconciliacion` acepta un único valor (`str`) o una
+    secuencia de valores del enum `TIPOS_FUENTE_CHISTE` — es el caller quien
+    decide el alcance de la comparación (Flujo B/C hoy comparan contra
+    `propio_historico`; una secuencia deja abierto un futuro `propio*` sin
+    cambiar la firma). Cada valor se valida con `_validar_tipo_fuente_chiste`
+    (reutilizado, tal como fija la spec): un valor fuera de enum lanza
+    `ValueError`, nunca degrada a query silenciosa. Una secuencia vacía
+    también es un error explícito — no hay tipo_fuente que pedir.
+    """
+    valores = [tipo_fuente] if isinstance(tipo_fuente, str) else list(tipo_fuente)
+    if not valores:
+        raise ValueError("tipo_fuente: se requiere al menos un valor")
+    for valor in valores:
+        _validar_tipo_fuente_chiste(valor)
+    return valores
+
+
+def _parsear_embedding(valor: Any) -> Optional[list]:
+    """Normaliza la columna `embedding` (pgvector) a `list[float]` (task 25).
+
+    PostgREST puede entregar una columna `vector` ya deserializada como
+    `list[float]` o como su representación de texto pgvector
+    (`"[0.1,0.2,0.3]"`), según el driver — este es el único punto de
+    adaptación entre ambas representaciones (§Reconciliación). Una fila sin
+    embedding (`None`, `""`, `[]`) se normaliza a `None`:
+    `decidir_reconciliacion` ya sabe saltarse una entrada sin embedding
+    (`candidato.get("embedding")` falsy), no hace falta forzar una lista vacía.
+    """
+    if not valor:
+        return None
+    if isinstance(valor, str):
+        texto = valor.strip().strip("[]").strip()
+        if not texto:
+            return None
+        return [float(componente) for componente in texto.split(",")]
+    return [float(componente) for componente in valor]
 
 
 def _timestamp_actual() -> str:
@@ -333,6 +376,46 @@ class SupabaseStore:
             self.client.table("chistes").update(payload).eq("id", chiste_id).execute()
         )
         return resultado.data[0]
+
+    def listar_candidatos_reconciliacion(
+        self, tipo_fuente: Union[str, Sequence[str]]
+    ) -> list[dict]:
+        """Candidatos de reconciliación para `reconciliacion.py` (task 25, §Reconciliación).
+
+        `reconciliacion.py` es agnóstico de Supabase por diseño (task 15):
+        `decidir_reconciliacion`/`reconciliar_chiste` reciben `candidatos` ya
+        resuelto como argumento. Este método cierra ese hueco: trae **todas**
+        las filas de `chistes` cuyo `tipo_fuente` cae en el alcance pedido
+        (uno o varios valores de `TIPOS_FUENTE_CHISTE`, validados vía
+        `_normalizar_tipo_fuente_candidatos`), con **exactamente** las tres
+        claves que `decidir_reconciliacion` consume: `id`, `hash_normalizado`,
+        `embedding` (`select("id, hash_normalizado, embedding")`, nunca
+        `select("*")`).
+
+        **Sin filtro de versión** (cada fila de `chistes` ya refleja el
+        contenido vigente, `version_actual`; la historia vive aparte en
+        `chistes_revisiones`, no se consulta aquí) y **con variantes**
+        (`chiste_origen_id` no nulo sigue siendo candidato — es un chiste
+        distinto, no una revisión, §Versionado). `embedding` se normaliza a
+        `list[float]` (o `None`) vía `_parsear_embedding`, adaptando la
+        posible representación de texto serializado de pgvector.
+        """
+        valores = _normalizar_tipo_fuente_candidatos(tipo_fuente)
+        query = self.client.table("chistes").select("id, hash_normalizado, embedding")
+        query = (
+            query.eq("tipo_fuente", valores[0])
+            if len(valores) == 1
+            else query.in_("tipo_fuente", valores)
+        )
+        filas = query.execute().data
+        return [
+            {
+                "id": fila["id"],
+                "hash_normalizado": fila.get("hash_normalizado"),
+                "embedding": _parsear_embedding(fila.get("embedding")),
+            }
+            for fila in filas
+        ]
 
     # -- chistes_revisiones (append-only, §Versionado) -------------------
 
