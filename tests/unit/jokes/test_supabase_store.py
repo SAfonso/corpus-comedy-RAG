@@ -14,12 +14,15 @@ from src.jokes.supabase_store import (
     ESTADOS_CHISTE,
     TIPOS_CANDIDATO_TAXONOMIA,
     TIPOS_FUENTE_CHISTE,
+    SupabaseStore,
     _build_candidato_payload,
     _build_candidato_update_payload,
     _build_chiste_payload,
     _build_chiste_update_payload,
     _build_mensaje_telegram_bronze_payload,
     _build_revision_payload,
+    _normalizar_tipo_fuente_candidatos,
+    _parsear_embedding,
     _validar_estado_candidato,
     _validar_estado_chiste,
     _validar_tipo_candidato,
@@ -308,3 +311,228 @@ def test_build_mensaje_telegram_bronze_payload_completo():
 def test_build_mensaje_telegram_bronze_payload_requiere_campos_obligatorios():
     with pytest.raises(TypeError):
         _build_mensaje_telegram_bronze_payload(texto_raw="un chiste")  # falta telegram_update_id
+
+
+# ---------------------------------------------------------------------------
+# _normalizar_tipo_fuente_candidatos (task 25, §Reconciliación) — acepta
+# str o Sequence[str], valida cada valor contra TIPOS_FUENTE_CHISTE.
+# ---------------------------------------------------------------------------
+
+def test_normalizar_tipo_fuente_candidatos_acepta_str_unico():
+    assert _normalizar_tipo_fuente_candidatos("propio_historico") == ["propio_historico"]
+
+
+def test_normalizar_tipo_fuente_candidatos_acepta_secuencia():
+    assert _normalizar_tipo_fuente_candidatos(["propio", "propio_historico"]) == [
+        "propio",
+        "propio_historico",
+    ]
+
+
+def test_normalizar_tipo_fuente_candidatos_rechaza_valor_invalido():
+    with pytest.raises(ValueError, match="tipo_fuente inválido"):
+        _normalizar_tipo_fuente_candidatos("ajeno")
+
+
+def test_normalizar_tipo_fuente_candidatos_rechaza_valor_invalido_dentro_de_secuencia():
+    with pytest.raises(ValueError, match="tipo_fuente inválido"):
+        _normalizar_tipo_fuente_candidatos(["propio", "ajeno"])
+
+
+def test_normalizar_tipo_fuente_candidatos_rechaza_secuencia_vacia():
+    with pytest.raises(ValueError, match="al menos un valor"):
+        _normalizar_tipo_fuente_candidatos([])
+
+
+# ---------------------------------------------------------------------------
+# _parsear_embedding (task 25, §Reconciliación) — adapta la representación
+# de pgvector (`list[float]` ya deserializada o `text` serializado, según
+# el driver de PostgREST) al `list[float]` que `similitud_coseno` espera.
+# ---------------------------------------------------------------------------
+
+def test_parsear_embedding_none_se_mantiene_none():
+    assert _parsear_embedding(None) is None
+
+
+def test_parsear_embedding_lista_vacia_se_normaliza_a_none():
+    assert _parsear_embedding([]) is None
+
+
+def test_parsear_embedding_cadena_vacia_se_normaliza_a_none():
+    assert _parsear_embedding("") is None
+
+
+def test_parsear_embedding_ya_lista_de_floats_se_devuelve_igual():
+    assert _parsear_embedding([0.1, 0.2, 0.3]) == [0.1, 0.2, 0.3]
+
+
+def test_parsear_embedding_texto_serializado_pgvector_se_parsea():
+    assert _parsear_embedding("[0.1,0.2,0.3]") == [0.1, 0.2, 0.3]
+
+
+def test_parsear_embedding_texto_serializado_con_espacios_se_parsea():
+    assert _parsear_embedding("[0.1, 0.2, 0.3]") == [0.1, 0.2, 0.3]
+
+
+# ---------------------------------------------------------------------------
+# SupabaseStore.listar_candidatos_reconciliacion (task 25, §Reconciliación)
+# — doble de cliente en memoria, sin red, siguiendo el patrón de
+# `tests/integration/test_supabase_store_live.py` pero sin conectar de verdad.
+# ---------------------------------------------------------------------------
+
+class _FakeResultado:
+    def __init__(self, data):
+        self.data = data
+
+
+class _FakeConsultaChistes:
+    """Doble mínimo de la interfaz fluida de `supabase-py` usada por el método:
+    `.table("chistes").select(...).eq(...)` o `.in_(...)`, luego `.execute()`.
+    """
+
+    def __init__(self, filas):
+        self._filas = filas
+        self._columnas_seleccionadas = None
+        self._filtro = None
+
+    def select(self, columnas):
+        self._columnas_seleccionadas = columnas
+        return self
+
+    def eq(self, columna, valor):
+        self._filtro = (columna, [valor])
+        return self
+
+    def in_(self, columna, valores):
+        self._filtro = (columna, list(valores))
+        return self
+
+    def execute(self):
+        assert self._columnas_seleccionadas == "id, hash_normalizado, embedding", (
+            "el método debe pedir SOLO id, hash_normalizado, embedding (no select('*'))"
+        )
+        columna, valores = self._filtro
+        filas = [f for f in self._filas if f.get(columna) in valores]
+        return _FakeResultado(filas)
+
+
+class _FakeClienteChistes:
+    def __init__(self, filas):
+        self._filas = filas
+
+    def table(self, nombre_tabla):
+        assert nombre_tabla == "chistes"
+        return _FakeConsultaChistes(self._filas)
+
+
+def test_listar_candidatos_reconciliacion_filtra_por_tipo_fuente_unico():
+    filas = [
+        {
+            "id": "1",
+            "hash_normalizado": "h1",
+            "embedding": [0.1, 0.2],
+            "tipo_fuente": "propio",
+        },
+        {
+            "id": "2",
+            "hash_normalizado": "h2",
+            "embedding": [0.3, 0.4],
+            "tipo_fuente": "propio_historico",
+        },
+    ]
+    store = SupabaseStore(client=_FakeClienteChistes(filas))
+
+    candidatos = store.listar_candidatos_reconciliacion("propio_historico")
+
+    assert candidatos == [
+        {"id": "2", "hash_normalizado": "h2", "embedding": [0.3, 0.4]}
+    ]
+
+
+def test_listar_candidatos_reconciliacion_acepta_secuencia_de_tipo_fuente():
+    filas = [
+        {"id": "1", "hash_normalizado": "h1", "embedding": None, "tipo_fuente": "propio"},
+        {
+            "id": "2",
+            "hash_normalizado": "h2",
+            "embedding": [0.3, 0.4],
+            "tipo_fuente": "propio_historico",
+        },
+        {"id": "3", "hash_normalizado": "h3", "embedding": None, "tipo_fuente": "ajeno_no_deberia_estar"},
+    ]
+    store = SupabaseStore(client=_FakeClienteChistes(filas))
+
+    candidatos = store.listar_candidatos_reconciliacion(["propio", "propio_historico"])
+
+    assert {c["id"] for c in candidatos} == {"1", "2"}
+
+
+def test_listar_candidatos_reconciliacion_devuelve_solo_las_tres_claves():
+    filas = [
+        {
+            "id": "1",
+            "hash_normalizado": "h1",
+            "embedding": [0.1, 0.2],
+            "tipo_fuente": "propio",
+            "estado": "rematado",
+            "version_actual": 3,
+        }
+    ]
+    store = SupabaseStore(client=_FakeClienteChistes(filas))
+
+    candidatos = store.listar_candidatos_reconciliacion("propio")
+
+    assert candidatos == [{"id": "1", "hash_normalizado": "h1", "embedding": [0.1, 0.2]}]
+    assert set(candidatos[0].keys()) == {"id", "hash_normalizado", "embedding"}
+
+
+def test_listar_candidatos_reconciliacion_incluye_variantes_chiste_origen_id():
+    filas = [
+        {
+            "id": "2",
+            "hash_normalizado": "h2",
+            "embedding": [0.5, 0.5],
+            "tipo_fuente": "propio_historico",
+            "chiste_origen_id": "1",
+        }
+    ]
+    store = SupabaseStore(client=_FakeClienteChistes(filas))
+
+    candidatos = store.listar_candidatos_reconciliacion("propio_historico")
+
+    assert len(candidatos) == 1
+    assert candidatos[0]["id"] == "2"
+
+
+def test_listar_candidatos_reconciliacion_parsea_embedding_texto_pgvector():
+    filas = [
+        {
+            "id": "1",
+            "hash_normalizado": "h1",
+            "embedding": "[0.1,0.2,0.3]",
+            "tipo_fuente": "propio",
+        }
+    ]
+    store = SupabaseStore(client=_FakeClienteChistes(filas))
+
+    candidatos = store.listar_candidatos_reconciliacion("propio")
+
+    assert candidatos[0]["embedding"] == [0.1, 0.2, 0.3]
+
+
+def test_listar_candidatos_reconciliacion_embedding_ausente_es_none():
+    filas = [
+        {"id": "1", "hash_normalizado": "h1", "embedding": None, "tipo_fuente": "propio"}
+    ]
+    store = SupabaseStore(client=_FakeClienteChistes(filas))
+
+    candidatos = store.listar_candidatos_reconciliacion("propio")
+
+    assert candidatos[0]["embedding"] is None
+
+
+def test_listar_candidatos_reconciliacion_rechaza_tipo_fuente_invalido():
+    store = SupabaseStore(client=_FakeClienteChistes([]))
+
+    with pytest.raises(ValueError, match="tipo_fuente inválido"):
+        store.listar_candidatos_reconciliacion("ajeno")
