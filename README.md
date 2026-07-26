@@ -6,37 +6,57 @@
 ![markitdown](https://img.shields.io/badge/markitdown-PDF%2FDOCX%E2%86%92MD-000000?style=flat-square&logo=microsoft&logoColor=white)
 ![DeepL](https://img.shields.io/badge/DeepL-translation-0F2B46?style=flat-square)
 ![pytest](https://img.shields.io/badge/tested%20with-pytest-0A9EDC?style=flat-square&logo=pytest&logoColor=white)
-![Estado](https://img.shields.io/badge/status-22%2F31%20tareas%20%E2%80%94%20orquestador%20Flujo%20A-brightgreen?style=flat-square)
+![Estado](https://img.shields.io/badge/status-31%2F47%20tareas%20%E2%80%94%20Flujo%20B%20webhook%20planificado-brightgreen?style=flat-square)
 
 > Pipeline de **ingesta, limpieza, estructuración y versionado** de datos para el
 > **Comedy RAG**. Corpus **multi-fuente**: cada unidad lleva `tipo_fuente` para
 > permitir *retrieval* separado por origen en el RAG *downstream*.
 
-**Estado:** 22/31 tareas del backlog cerradas (ver [`feature_list.json`](feature_list.json));
-las 10 restantes son la ronda de orquestación end-to-end (tasks 23-31: CLIs
-estables, Flujo C completo, integración Drive real). `schema.sql` está
-aplicado por completo en el proyecto Supabase real (incluida la ampliación
-de `teoria_chunks`/`chistes_telegram_bronze` de las tasks 16/21 — ver nota
-de `ALTER TABLE` en la cabecera de `schema.sql` para próximas ampliaciones
-de tablas ya existentes) y `pytest tests/integration -v` pasa de verdad
-contra Supabase + Gemini (13 passed, 1 skip ajeno — DeepL).
+**Estado:** 31/47 tareas del backlog cerradas (ver [`feature_list.json`](feature_list.json)).
+El backlog original (1-31) está **completo**: los tres flujos tienen su
+orquestador importable, y A/C tienen además CLI estable + automatización.
+Las 16 tareas restantes (32-47, todas `pending`, aún sin implementar) son
+una segunda ronda de planificación que cierra dos huecos dejados fuera a
+propósito: conectividad real de Telegram (Flujo B, hoy solo tiene la
+ingesta Bronze) e integración real con Google Drive para Flujo A (P18,
+diferida desde el principio). `schema.sql` está aplicado por completo en
+el proyecto Supabase real (incluida la ampliación de
+`teoria_chunks`/`chistes_telegram_bronze` de las tasks 16/21 — ver nota de
+`ALTER TABLE` en la cabecera de `schema.sql` para próximas ampliaciones de
+tablas ya existentes) y `pytest tests/integration -v` pasa de verdad contra
+Supabase + Gemini.
 - **Flujo A (Teoría):** completo — los 8 componentes de la cadena implementados
   y testeados (`DriveMonitor` → ... → `FormatNormalizer` → `/data/processed/v{N}/`),
-  más `validate_corpus.py` como gate de validación y `src/theory/pipeline.py`
-  (task 22) como orquestador importable de la cadena entera, con reanudación
-  por `processed_files.json` (un fichero solo se marca procesado tras
-  completar la cadena con éxito hasta `generar_version`). El CLI estable
-  (`scripts/run_pipeline.py`, task 23) queda fuera del backlog cerrado.
+  `validate_corpus.py` como gate de validación, `src/theory/pipeline.py`
+  (task 22) como orquestador importable con reanudación por
+  `processed_files.json`, y `scripts/run_pipeline.py` (task 23) como CLI
+  estable para invocación externa por `subprocess`. Pendiente (tasks 42-45,
+  planificadas): cerrar P18 sustituyendo `DriveMonitor` sobre carpeta local
+  por integración real con la API de Drive, reutilizando el patrón ya
+  validado en Flujo C (`historico/drive_source.py`).
 - **Contrato compartido B/C:** `supabase_store.py` + DDL, `silver.py` (LLM), el
   mapeo de taxonomías (loop acotado P16) y `reconciliacion.py` (dedup
-  hash+embedding, task 15) implementados.
-- **Flujo C (Histórico):** completo — `marcar_remates.py`, `loader.py` y
-  `segmentador.py` (frontera determinista por `[REMATE]`, inicio de setup por
-  LLM sin loop, task 19) implementados.
+  hash+embedding, task 15) implementados. Pendiente (tasks 33-34,
+  planificadas): extraer el routing a Supabase de `historico/pipeline.py`
+  a un módulo compartido (`src/jokes/routing.py`) para que Flujo B lo
+  reutilice sin duplicar lógica.
+- **Flujo C (Histórico):** completo end-to-end — `marcar_remates.py`,
+  `loader.py`, `segmentador.py` (frontera determinista por `[REMATE]`,
+  inicio de setup por LLM sin loop, task 19), integración real con Drive
+  (`drive_source.py`, task 30), `coste.py` como gate de presupuesto
+  dry-run (task 26), `historico/pipeline.py` como orquestador (task 27) y
+  `scripts/run_historico.py` como CLI estable (task 28), automatizado por
+  `.github/workflows/run_historico_semanal.yml` (cron semanal desatendido,
+  task 31).
 - **Flujo B (Telegram):** `telegram_bot.py` implementado (Bronze inmutable,
-  idempotencia por `telegram_update_id`, pre-limpieza mínima, task 16); la
-  conexión real con la API de Telegram (polling/webhook) queda para el script
-  de orquestación del flujo.
+  idempotencia por `telegram_update_id`, pre-limpieza mínima, task 16).
+  Pendiente (tasks 32-41 + 46-47, planificadas, no implementadas): cierre
+  end-to-end vía **webhook** (no polling) — orquestador Bronze→Silver→
+  Reconciliación, app FastAPI con validación de `secret_token`, respuesta
+  200 inmediata con el tramo LLM en background, recuperación de fallos
+  post-200 vía columna `procesado_at` + script de reproceso, y despliegue
+  en contenedor Docker (GitHub Actions + SSH, sin Coolify) detrás de Caddy
+  en el puerto 8443 del VPS.
 - **Ingesta de teoría a Supabase** (`teoria_chunks` + índice pgvector
   compartido, task 21): implementada (`src/theory/ingest_teoria.py`).
 
