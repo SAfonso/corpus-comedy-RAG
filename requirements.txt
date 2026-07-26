@@ -27,3 +27,4 @@ google-genai              # Cliente oficial de Gemini (LLM barato, §Silver), ta
 # Testing
 pytest
 pytest-cov
+PyYAML                   # parseo del workflow de GH Actions en tests (task 31, test_run_historico_workflow.py)

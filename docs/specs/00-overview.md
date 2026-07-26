@@ -5,8 +5,10 @@
 > histórico por color, 2026-07-06), P16 (loops LLM, 2026-07-09), P17
 > (markitdown para Parser de teoría, 2026-07-21), P18 (DriveMonitor sobre
 > carpeta local, Drive API real diferida, 2026-07-22), P19 (Flujo C lee de
-> carpeta Drive real vía `drive_source.py`, 2026-07-24) y P20 (candidatos de
-> reconciliación filtrados por `tipo_fuente`, 2026-07-24).
+> carpeta Drive real vía `drive_source.py`, 2026-07-24), P20 (candidatos de
+> reconciliación filtrados por `tipo_fuente`, 2026-07-24) y P21 (Flujo C:
+> ejecución semanal desatendida vía GitHub Actions, `run_historico_semanal.yml`,
+> 2026-07-26).
 
 Este documento es el **punto de entrada**. La spec completa ya no vive en un solo
 fichero: está partida por módulo, colocada **dentro de `src/`**, junto al código
@@ -204,6 +206,61 @@ candidatos (task 15, no se toca), y el volumen del corpus es bajo (GraphRAG
 descartado por lo mismo, §1). La ANN queda como optimización futura compatible
 con la interfaz (el método puede hacer el trabajo en SQL y seguir devolviendo
 `list[dict]`).
+
+**P21 (2026-07-26) — Flujo C: ejecución semanal desatendida vía GitHub
+Actions.** Cierra la promesa de P19 ("su run será semanal y desatendido...
+task 31"): `.github/workflows/run_historico_semanal.yml` (primer workflow del
+repo — no hay CI de tests configurado, esta tarea es solo el cron de
+producción del Flujo C) invoca `scripts/run_historico.py` (task 28) sin
+reimplementar ninguna de sus etapas. Decisiones no obvias:
+- **Cron:** sábado 03:00 UTC (`0 3 * * 6`). Evita horas pico de la API de
+  Drive/LLM (fin de semana laboral) y deja el domingo entero como margen para
+  investigar un fallo antes de que arranque la semana laboral el lunes.
+- **`workflow_dispatch`** añadido como segundo trigger (además del cron), con
+  un input opcional `dry_run` — permite lanzar el workflow a mano (primer run,
+  verificación puntual) sin esperar al sábado, y probar solo el gate de coste
+  sin ejecutar el pipeline completo si `dry_run: true`.
+- **Credenciales de Drive (restricción ya fijada en
+  `src/jokes/historico/SPEC.md` §"Auth desatendida"):** cuenta de servicio,
+  nunca OAuth interactivo (no hay navegador en un runner). Un secreto de
+  GitHub Actions es un string, no un fichero, así que el JSON completo de la
+  cuenta de servicio vive en el secreto `GOOGLE_SERVICE_ACCOUNT_JSON`; un paso
+  del workflow lo escribe a `$RUNNER_TEMP/google-service-account.json` y
+  exporta `GOOGLE_APPLICATION_CREDENTIALS` apuntando ahí — mismo mecanismo por
+  defecto que ya usa `run_historico.py` (su docstring, §Credenciales), sin
+  necesidad de pasar `--credentials-path`.
+- **Resto de secrets:** nombres 1:1 con las variables de Flujo C en
+  `.env.example` (`DRIVE_FOLDER_ID_HISTORICO`, `SUPABASE_URL`,
+  `SUPABASE_SERVICE_KEY`, `LLM_API_KEY`, `LLM_MODEL`, `EMBEDDINGS_API_KEY`,
+  `EMBEDDINGS_MODEL`, y las tres opcionales del gate de coste
+  `HISTORICO_COSTE_MAX_TOKENS`/`HISTORICO_COSTE_MAX_EUR`/
+  `HISTORICO_COSTE_EUR_POR_MILLON_TOKENS`) — única excepción la credencial de
+  Drive, por el motivo de arriba.
+- **Exit codes 0/1/2 de `run_historico.py`** (task 28): el job falla
+  visiblemente (sin `continue-on-error`) tanto en `1` (fallo) como en `2`
+  (abort por coste) — un abort por coste sigue siendo una señal que requiere
+  atención humana (ajustar umbrales o esperar), no debe pasar desapercibido en
+  verde. Se distingue en el Job Summary (`2` se anota explícitamente como
+  "abort por coste", no un fallo del pipeline en sí) para que quien revise el
+  run no confunda ambos casos, pero el job se marca en rojo en los dos.
+- **Persistencia de estado entre runs:** un runner de GitHub Actions es
+  efímero, así que sin ayuda cada run semanal repetiría `DriveSource.sync()` y
+  `Loader.load()` desde cero (correcto igualmente por la idempotencia en
+  capas del Flujo C — ver comparativa de arriba — pero re-descargando/
+  re-marcando todo). El workflow usa `actions/cache` sobre
+  `data/staging/historico/` y `data/state/historico_drive.json` +
+  `data/state/historico_loader.json` (rutas por defecto de
+  `src/jokes/historico/pipeline.py`), con clave única por `run_id` y
+  `restore-keys` de prefijo para recuperar el estado del run anterior más
+  reciente. Limitación conocida y asumida: la cache de GitHub Actions no es
+  persistencia garantizada (política LRU, límite de 10GB por repo) — un
+  cache-miss no rompe la corrección del pipeline (las capas de idempotencia
+  siguen siendo válidas), solo le hace repetir trabajo ya hecho.
+- **Setup de Python:** `actions/setup-python` + `pip install -r
+  requirements.txt` directo (sin `.venv`, a diferencia de `init.sh` en local
+  — el runner ya es un entorno aislado y efímero, no hace falta el aislamiento
+  extra que `init.sh` necesita por el `externally-managed-environment` de
+  Python en el host de desarrollo).
 
 ## Metodología SDD + TDD (aplica a todo el proyecto)
 
