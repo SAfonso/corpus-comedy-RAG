@@ -1,0 +1,154 @@
+# Flujo C — Histórico: ejecución semanal desatendida (task 31).
+#
+# Invoca `scripts/run_historico.py` (task 28, CLI ya cerrado — este workflow
+# NO reimplementa ninguna lógica del gate de coste ni del pipeline, solo lo
+# invoca con los secrets correctos). Decisión documentada en
+# docs/specs/00-overview.md, P21 (busca "P21" en ese fichero para el
+# desarrollo completo de cada decisión resumida aquí).
+#
+# Resumen de decisiones (detalle en P21):
+# - Cron: sábado 03:00 UTC ("0 3 * * 6"). Evita horas pico de la API de Drive/
+#   LLM (fin de semana) y deja el domingo entero como margen para investigar
+#   un fallo antes del lunes laboral.
+# - workflow_dispatch añadido como trigger manual, con un input opcional
+#   `dry_run` para poder probar el gate de coste a mano sin ejecutar el
+#   pipeline completo (primer run, o verificación puntual).
+# - Auth de Drive por cuenta de servicio (restricción ya fijada en
+#   src/jokes/historico/SPEC.md §"Auth desatendida"): el secreto
+#   `GOOGLE_SERVICE_ACCOUNT_JSON` contiene el JSON completo de la cuenta de
+#   servicio como STRING (un secreto de GitHub Actions no puede ser un
+#   fichero). Se escribe a `$RUNNER_TEMP/google-service-account.json` en el
+#   runner y `GOOGLE_APPLICATION_CREDENTIALS` apunta ahí — mismo mecanismo que
+#   ya usa run_historico.py por defecto (ver su docstring, §Credenciales).
+# - Resto de secrets: nombres 1:1 con las variables de `.env.example`
+#   (DRIVE_FOLDER_ID_HISTORICO, SUPABASE_URL, SUPABASE_SERVICE_KEY,
+#   LLM_API_KEY, LLM_MODEL, EMBEDDINGS_API_KEY, EMBEDDINGS_MODEL y las tres
+#   opcionales del gate de coste) — única excepción la credencial de Drive,
+#   por el motivo de arriba.
+# - Exit codes de run_historico.py (0/1/2, ver su docstring §Semántica de
+#   exit codes): el job falla visiblemente (exit no-cero) tanto en 1 (fallo)
+#   como en 2 (abort por coste) — sin `continue-on-error`. Se distingue en el
+#   Job Summary (2 = "abort por coste", no un fallo del pipeline en sí) para
+#   que quien revise el run no confunda ambos casos, pero el job en rojo es
+#   intencional en los dos.
+# - Estado entre runs (`data/staging/historico/`, `data/state/historico_*.json`):
+#   cacheado con `actions/cache` (clave única por `run_id` + `restore-keys` de
+#   prefijo, para restaurar el estado más reciente disponible). Sin esto cada
+#   run semanal repetiría trabajo desde cero (el pipeline seguiría siendo
+#   correcto por sus capas de idempotencia, pero re-descargaría/reprocesaría
+#   todo). Limitación conocida: la cache de GitHub Actions no es persistencia
+#   garantizada (LRU, límite de 10GB/repo) — un fallo de cache-miss no rompe
+#   la corrección del pipeline, solo le hace repetir trabajo ya hecho.
+
+name: Flujo C — Histórico semanal
+
+on:
+  schedule:
+    # 03:00 UTC cada sábado — ver justificación arriba y P21 en 00-overview.md.
+    - cron: "0 3 * * 6"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: >-
+          Solo evaluar el gate de coste (--dry-run): no ejecuta el pipeline
+          completo ni escribe en Supabase.
+        required: false
+        type: boolean
+        default: false
+
+# Evita solapar dos runs escribiendo a la vez sobre el mismo estado cacheado
+# (data/state/, data/staging/historico/); no cancela un run ya en marcha.
+concurrency:
+  group: historico-semanal
+  cancel-in-progress: false
+
+jobs:
+  run-historico:
+    name: Ejecutar Flujo C (run_historico.py)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Restaurar estado del Flujo C (staging + idempotencia)
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/staging/historico
+            data/state/historico_drive.json
+            data/state/historico_loader.json
+          key: historico-state-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            historico-state-${{ runner.os }}-
+
+      - name: Materializar credenciales de Google (cuenta de servicio)
+        run: echo "$GOOGLE_SERVICE_ACCOUNT_JSON" > "$RUNNER_TEMP/google-service-account.json"
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+
+      - name: Determinar flags de ejecución
+        id: flags
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "dry_run_flag=--dry-run" >> "$GITHUB_OUTPUT"
+          else
+            echo "dry_run_flag=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Ejecutar run_historico.py
+        id: run_historico
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/google-service-account.json
+          DRIVE_FOLDER_ID_HISTORICO: ${{ secrets.DRIVE_FOLDER_ID_HISTORICO }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+          EMBEDDINGS_API_KEY: ${{ secrets.EMBEDDINGS_API_KEY }}
+          EMBEDDINGS_MODEL: ${{ secrets.EMBEDDINGS_MODEL }}
+          HISTORICO_COSTE_MAX_TOKENS: ${{ secrets.HISTORICO_COSTE_MAX_TOKENS }}
+          HISTORICO_COSTE_MAX_EUR: ${{ secrets.HISTORICO_COSTE_MAX_EUR }}
+          HISTORICO_COSTE_EUR_POR_MILLON_TOKENS: ${{ secrets.HISTORICO_COSTE_EUR_POR_MILLON_TOKENS }}
+        run: |
+          set +e
+          python scripts/run_historico.py \
+            --summary-out "$RUNNER_TEMP/historico_summary.json" \
+            ${{ steps.flags.outputs.dry_run_flag }}
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          set -e
+
+      - name: Publicar resumen y resultado del job
+        if: always()
+        run: |
+          EXIT_CODE="${{ steps.run_historico.outputs.exit_code }}"
+          {
+            echo "### Resultado \`run_historico.py\` (Flujo C)"
+            echo ""
+            if [ -f "$RUNNER_TEMP/historico_summary.json" ]; then
+              echo '```json'
+              cat "$RUNNER_TEMP/historico_summary.json"
+              echo '```'
+            else
+              echo "_Sin resumen JSON — fallo antes de generarlo._"
+            fi
+            echo ""
+            case "$EXIT_CODE" in
+              0) echo "**Estado: OK** (exit 0)." ;;
+              2) echo "**Estado: ABORT POR COSTE** (exit 2) — el gate de coste bloqueó el run; no es un fallo del pipeline en sí, pero el job se marca en rojo a propósito (ver comentario del workflow)." ;;
+              *) echo "**Estado: FALLO** (exit ${EXIT_CODE:-desconocido})." ;;
+            esac
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$EXIT_CODE"
