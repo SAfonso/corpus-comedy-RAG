@@ -6,9 +6,10 @@
 > (markitdown para Parser de teoría, 2026-07-21), P18 (DriveMonitor sobre
 > carpeta local, Drive API real diferida, 2026-07-22), P19 (Flujo C lee de
 > carpeta Drive real vía `drive_source.py`, 2026-07-24), P20 (candidatos de
-> reconciliación filtrados por `tipo_fuente`, 2026-07-24) y P21 (Flujo C:
+> reconciliación filtrados por `tipo_fuente`, 2026-07-24), P21 (Flujo C:
 > ejecución semanal desatendida vía GitHub Actions, `run_historico_semanal.yml`,
-> 2026-07-26).
+> 2026-07-26) y P22 (Flujo B: transporte por webhook, 200 antes del tramo LLM,
+> 2026-07-27).
 
 Este documento es el **punto de entrada**. La spec completa ya no vive en un solo
 fichero: está partida por módulo, colocada **dentro de `src/`**, junto al código
@@ -261,6 +262,48 @@ reimplementar ninguna de sus etapas. Decisiones no obvias:
   — el runner ya es un entorno aislado y efímero, no hace falta el aislamiento
   extra que `init.sh` necesita por el `externally-managed-environment` de
   Python en el host de desarrollo).
+
+**P22 (2026-07-27) — Flujo B: transporte por webhook y 200 antes del tramo
+LLM.** El Flujo B se alimenta de un **webhook** de la Bot API
+(`POST /telegram/webhook` en una app FastAPI, task 36), no de polling
+`getUpdates`: con servidor y dominio propios (deploy en tasks 38-41), el polling
+solo compraría la desventaja de un proceso en bucle infinito —uno más que
+supervisar, latencia atada al intervalo de sondeo— para obtener lo que el
+webhook da gratis, y el webhook es además el patrón que Telegram recomienda en
+producción. `telegram_bot.py` (task 16) no cambia: el `Update` tiene la misma
+forma JSON por cualquiera de las dos vías. Decisiones no obvias:
+- **El endpoint responde `200` inmediatamente tras Bronze**, y ejecuta el tramo
+  caro (Silver → taxonomías → reconciliación → routing) en `BackgroundTasks`.
+  Motivo: Telegram reintenta el update si no recibe un 2xx pronto, y ese tramo
+  son varios segundos de red contra terceros. Contrapartida asumida: si el
+  background falla después del 200, Telegram **no** reintenta — de ahí la
+  columna `procesado_at` (nullable) en `chistes_telegram_bronze` + script de
+  reproceso (tasks 46/47), contrapartida obligatoria, no opcional.
+- **Autenticación por `secret_token`** (header
+  `X-Telegram-Bot-Api-Secret-Token`, soportado nativamente por la Bot API,
+  comparado en tiempo constante): sin cálculo de firmas propias. Falta o no
+  coincide → `403` sin parsear el cuerpo.
+- **Control de coste sin gate batch.** `historico/coste.py` (Flujo C) es un
+  dry-run sobre un corpus finito **antes** del run; en tiempo real no hay corpus
+  que medir ni un "antes" (el run es el evento). Los controles primarios son
+  preventivos: **allowlist de `chat_id`** (variable de entorno
+  `TELEGRAM_ALLOWED_CHAT_IDS`, evaluada **antes de Bronze**, fallo de arranque
+  si falta — nunca fallo abierto) e **idempotencia por `telegram_update_id`**
+  (un duplicado ni siquiera agenda el tramo LLM). Rate-limiting explícito queda
+  **fuera de esta ronda** (un solo usuario, volumen bajo); su sitio natural, si
+  hiciera falta, es el mismo tramo síncrono tras la allowlist.
+- **Códigos HTTP:** cualquier respuesta no-2xx hace reintentar a Telegram, así
+  que "no autorizado", "no es texto" y "duplicado" responden `200` (son
+  decisiones terminales, no fallos de entrega). Puerto público **8443**: la Bot
+  API solo admite 443/80/88/8443 y Coolify ya ocupa 80 y 443 en el VPS.
+- **Orquestación fuera del endpoint:** la cadena vive en `telegram/pipeline.py`
+  (task 35), importable y testeable sin red, para que el reproceso de la task 47
+  la reutilice sin pasar por HTTP; el routing a Supabase se apoya en el módulo
+  compartido `src/jokes/routing.py` (tasks 33/34).
+
+Detalle completo en
+[`src/jokes/telegram/SPEC.md`](../../src/jokes/telegram/SPEC.md) §Transporte y
+§Orquestación end-to-end.
 
 ## Metodología SDD + TDD (aplica a todo el proyecto)
 
