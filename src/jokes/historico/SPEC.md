@@ -94,7 +94,16 @@ siempre.
    su control de calidad es revisión humana muestral, no auto-convergencia.
 4. **Silver:** mismo esquema que Telegram — ver `src/jokes/SPEC.md` §Silver.
 5. **Reconciliación** → Supabase con `tipo_fuente='propio_historico'` — ver
-   `src/jokes/SPEC.md` §Reconciliación.
+   `src/jokes/SPEC.md` §Reconciliación. Se subdivide en **5a** (obtener
+   candidatos con `listar_candidatos_reconciliacion` + `reconciliar_chiste`),
+   que se queda **en este flujo**, y **5b** (aplicar la decisión
+   IGUAL/CAMBIADO/NUEVO sobre Supabase), que a partir de la task 34 **delega**
+   en el componente compartido `src/jokes/routing.py` pasándole
+   `tipo_fuente='propio_historico'` de forma explícita — ver `src/jokes/SPEC.md`
+   §Routing. La delegación es una extracción sin cambio de comportamiento: la
+   constante `TIPO_FUENTE` sigue viviendo en `historico/pipeline.py` (la usa 5a)
+   y `ChisteRuteado` sigue exponiendo sus 5 campos, `inicio_localizado`
+   incluido (bandera del Segmentador, propia de este flujo).
 
 **Re-ejecutable:** con el tiempo llegarán documentos nuevos que pueden traer
 chistes iguales o cambiados. La reconciliación a nivel de chiste enruta cada
