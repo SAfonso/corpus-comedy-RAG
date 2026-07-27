@@ -14,14 +14,24 @@
 # dejarlo en la raíz del checkout, junto a este docker-compose.yml un nivel
 # por debajo en deploy/).
 #
-# Task 39 (Caddy, depende de esta): añadirá aquí un segundo servicio
-# (p. ej. `caddy`) como frontend TLS en el puerto 8443, que proxea
-# internamente al servicio `webhook` de abajo por su nombre — Compose
-# resuelve los nombres de servicio como hostname dentro de la red por
-# defecto que crea para este fichero. Por eso `webhook` NO publica su
-# puerto al host (nada de `ports:`): con `expose:` basta para dejarlo
-# alcanzable solo dentro de esa red, listo para que Caddy proxee sin tener
-# que tocar nada de lo de aquí.
+# Task 39 (Caddy): añade el servicio `caddy` de abajo como frontend TLS en el
+# puerto 8443, que proxea internamente al servicio `webhook` de este fichero
+# por su nombre — Compose resuelve los nombres de servicio como hostname
+# dentro de la red por defecto que crea para este fichero. Por eso `webhook`
+# NO publica su puerto al host (nada de `ports:`): con `expose:` basta para
+# dejarlo alcanzable solo dentro de esa red, listo para que Caddy proxee.
+#
+# `caddy` usa una imagen custom (deploy/Dockerfile.caddy), no `caddy:2-alpine`
+# tal cual: el desafío ACME de este dominio solo puede resolverse vía DNS-01
+# (módulo `caddy-dns/porkbun`) porque Coolify ya ocupa los puertos públicos
+# 80/443 en el VPS — HTTP-01/TLS-ALPN-01 exigen esos puertos por protocolo,
+# no por config de Caddy, así que servir en 8443 no los hace viables.
+# Razonamiento completo en deploy/Caddyfile y deploy/Dockerfile.caddy.
+#
+# `caddy_data`/`caddy_config` son volúmenes nombrados persistentes: guardan
+# el certificado ACME emitido y el estado interno de Caddy. Sin ellos, cada
+# recreación del contenedor perdería el certificado y volvería a pedir uno
+# nuevo a Let's Encrypt, gastando el rate limit de emisión.
 
 services:
   webhook:
@@ -42,3 +52,28 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  caddy:
+    build:
+      context: .
+      dockerfile: Dockerfile.caddy
+    env_file:
+      - ../.env
+    depends_on:
+      - webhook
+    restart: unless-stopped
+    # Único puerto de todo el servicio publicado al host — el punto de
+    # entrada externo real. 80 deliberadamente NO se publica ni se reclama:
+    # ya lo gestiona Coolify, y el challenge ACME de este dominio no lo
+    # necesita (ver comentario de arriba y deploy/Caddyfile — DNS-01, no
+    # HTTP-01/TLS-ALPN-01).
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

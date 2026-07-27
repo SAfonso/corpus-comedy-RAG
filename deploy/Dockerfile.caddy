@@ -1,0 +1,23 @@
+# deploy/Dockerfile.caddy — build de Caddy con el módulo DNS de Porkbun (task 39).
+#
+# Por qué una imagen custom y no `caddy:2-alpine` tal cual: el desafío ACME
+# de este despliegue solo puede resolverse vía DNS-01 (ver el comentario en
+# deploy/Caddyfile para el razonamiento completo — HTTP-01/TLS-ALPN-01 no son
+# viables porque Coolify ya ocupa los puertos públicos 80/443 en el VPS), y
+# los módulos de proveedor DNS no vienen incluidos en la imagen oficial. Se
+# usa la imagen `builder` oficial (trae xcaddy preinstalado) para compilar un
+# binario de Caddy con el módulo `caddy-dns/porkbun`, y luego se copia ese
+# binario sobre la imagen `caddy:2-alpine` normal — mismo patrón que
+# documenta la propia imagen oficial de Docker Hub para builds con módulos.
+#
+# Contexto de build: `.` (deploy/), no la raíz del repo — a diferencia de
+# deploy/Dockerfile (el del servicio `webhook`), este build no necesita
+# `src/` ni `requirements.txt`.
+FROM caddy:2-builder-alpine AS builder
+
+RUN xcaddy build \
+    --with github.com/caddy-dns/porkbun
+
+FROM caddy:2-alpine
+
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy

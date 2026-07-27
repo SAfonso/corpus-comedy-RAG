@@ -1,0 +1,43 @@
+# deploy/Caddyfile — Flujo B: frontend TLS para el webhook de Telegram (task 39).
+#
+# Puerto 8443, no 443/80: Coolify ya ocupa esos dos puertos en el VPS
+# gestionando otros servicios del usuario (decisión ya cerrada — ver
+# src/jokes/telegram/SPEC.md §"Registro del webhook" y docs/specs/00-overview.md
+# §"Flujo B"). La Bot API de Telegram solo acepta webhooks en 443/80/88/8443,
+# así que 8443 es el único puerto libre del conjunto permitido.
+#
+# --- Desafío ACME: por qué DNS-01 y no HTTP-01 / TLS-ALPN-01 -----------------
+# Verificado (no asumido) contra la documentación de Caddy y de Let's Encrypt:
+# los challenges HTTP-01 y TLS-ALPN-01 de ACME están fijados por el propio
+# protocolo a los puertos PÚBLICOS 80 y 443 respectivamente — el validador de
+# Let's Encrypt conecta SIEMPRE ahí, sin importar en qué puerto sirva Caddy el
+# sitio realmente. El sufijo `:8443` de la dirección de abajo le dice a Caddy
+# en qué puerto escuchar tráfico de sitio, pero NO reconfigura a qué puerto
+# conecta el validador de la CA para resolver el challenge — ese es un
+# malentendido común, y es justo la trampa que esta tarea pedía verificar en
+# vez de asumir.
+#
+# Como Coolify ya posee 80 y 443 en este VPS sin reenviar tráfico hacia este
+# contenedor (decisión explícita: nada de Coolify para este servicio), ni
+# HTTP-01 ni TLS-ALPN-01 pueden completarse aquí — daría igual qué directiva
+# se añadiese en este fichero, porque la limitación es del protocolo ACME
+# público, no de Caddy.
+#
+# La única vía que no depende de ningún puerto público entrante es el
+# challenge DNS-01 (crea un registro TXT temporal para probar propiedad del
+# dominio). El DNS de machango.org vive en Porkbun — confirmado con
+# `dig NS machango.org` → fortaleza/maceio/salvador/curitiba.ns.porkbun.com —
+# así que se usa el módulo oficial `caddy-dns/porkbun`, compilado en la
+# imagen custom de deploy/Dockerfile.caddy (la imagen oficial `caddy:2-alpine`
+# no trae módulos DNS por defecto). Credenciales de API vía variables de
+# entorno (ver .env.example), nunca en claro en este fichero.
+turrabot.machango.org:8443 {
+	tls {
+		dns porkbun {
+			api_key {env.PORKBUN_API_KEY}
+			api_secret_key {env.PORKBUN_API_SECRET_KEY}
+		}
+	}
+
+	reverse_proxy webhook:8000
+}
