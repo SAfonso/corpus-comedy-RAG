@@ -8,8 +8,10 @@
 > carpeta Drive real vía `drive_source.py`, 2026-07-24), P20 (candidatos de
 > reconciliación filtrados por `tipo_fuente`, 2026-07-24), P21 (Flujo C:
 > ejecución semanal desatendida vía GitHub Actions, `run_historico_semanal.yml`,
-> 2026-07-26) y P22 (Flujo B: transporte por webhook, 200 antes del tramo LLM,
-> 2026-07-27).
+> 2026-07-26), P22 (Flujo B: transporte por webhook, 200 antes del tramo LLM,
+> 2026-07-27) y P23 (Flujo A: Drive real deja de estar diferido — cierra P18 —
+> con núcleo compartido `src/utils/drive_sync.py` y staging propio
+> `data/staging/theory/`, 2026-07-27).
 
 Este documento es el **punto de entrada**. La spec completa ya no vive en un solo
 fichero: está partida por módulo, colocada **dentro de `src/`**, junto al código
@@ -126,8 +128,10 @@ src/
 ├── utils/                 # COMPARTIDO entre flujos — SPEC.md
 │   ├── language_detector.py
 │   ├── quality_scorer.py
+│   ├── drive_sync.py       # núcleo de sync con Drive real (A y C) — P23
 │   └── llm/                # cliente LLM (Silver) y embeddings
 ├── theory/                 # Flujo A — SPEC.md
+│   ├── drive_sync.py        # especialización de teoría sobre utils/drive_sync
 │   ├── drive_monitor.py
 │   ├── parsers/             # whisperx, pdf, epub, docx
 │   ├── cleaners/
@@ -165,7 +169,7 @@ los flujos B y C porque tratan la misma unidad (`propio*`), pero no con teoría
 
 | Flujo            | Idempotencia                              | Versionado             | Detalle |
 |-------------------|---------------------------------------------|--------------------------|-----------|
-| A — Teoría        | `processed_files.json` (hash MD5)         | `v{N}` inmutable         | `src/theory/SPEC.md` |
+| A — Teoría        | `processed_files.json` (hash MD5) + metadata de Drive en modo Drive-real (P23) | `v{N}` inmutable         | `src/theory/SPEC.md` |
 | B — Telegram      | Por evento (`telegram_update_id`)         | Por chiste                | `src/jokes/telegram/SPEC.md` |
 | C — Histórico     | Hash MD5 del documento + reconciliación de chiste | Por chiste        | `src/jokes/historico/SPEC.md` |
 
@@ -174,9 +178,10 @@ los flujos B y C porque tratan la misma unidad (`propio*`), pero no con teoría
 - **Reanudación:** si cualquier flujo falla a mitad, retoma desde el último ítem
   no completado (fichero/documento/evento), sin reprocesar lo ya hecho.
 
-**P19 (2026-07-24) — Flujo C lee de carpeta Drive real.** A diferencia del
-Flujo A, cuya integración con Drive real está diferida sobre carpeta local
-(P18), el Flujo C **sí** consume una carpeta de Google Drive real vía un
+**P19 (2026-07-24) — Flujo C lee de carpeta Drive real.** En su momento, a
+diferencia del Flujo A —cuya integración con Drive real estaba diferida sobre
+carpeta local (P18) hasta que P23 la cerró reutilizando este mismo
+mecanismo—, el Flujo C **sí** consume una carpeta de Google Drive real vía un
 componente nuevo `src/jokes/historico/drive_source.py`: lista la carpeta,
 descarga a un *staging* local solo los `.docx` nuevos/modificados (idempotencia
 por metadata de Drive `fileId` + `modifiedTime`, **capa independiente** de la
@@ -304,6 +309,52 @@ forma JSON por cualquiera de las dos vías. Decisiones no obvias:
 Detalle completo en
 [`src/jokes/telegram/SPEC.md`](../../src/jokes/telegram/SPEC.md) §Transporte y
 §Orquestación end-to-end.
+
+**P23 (2026-07-27) — Flujo A: Drive real deja de estar diferido (cierra P18).**
+`DriveMonitor` dejaba de apuntar a la API de Drive "de momento" (P18) y vigilaba
+`data/raw/books/`/`data/raw/notes/` en local. El Flujo C ya resolvió el mismo
+problema con Drive real (P19), así que el Flujo A **reutiliza ese núcleo** en
+vez de reimplementarlo: `src/jokes/historico/drive_source.py` se generaliza a
+`src/utils/drive_sync.py` (`DriveSync`, task 43), parametrizado por
+`mimes_aceptados: dict[mime_origen -> mime_export | None]` — un dict y no una
+lista + callback porque las claves alimentan a la vez la query de `files().list`
+y la decisión `get_media` vs `export`, y así no se pueden desincronizar. Es la
+primera pieza de `src/utils/` con consumo real en los dos lados de la regla de
+dependencias (`theory/` y `jokes/` no se importan entre sí). La extracción es
+sin cambio de comportamiento, mismo patrón que la task 34 con `routing.py`: los
+tests de la task 30 deben quedar en verde **sin modificarse**. Decisiones no
+obvias:
+- **Staging propio, `data/staging/theory/`, NUNCA `data/raw/`.** Un sync
+  automático sobrescribe por definición, y `/data/raw/` es material sagrado
+  (`CLAUDE.md`, §1 de este documento). P23 fija la lectura correcta de la regla:
+  lo sagrado es **el único ejemplar que existe del original**. En modo
+  Drive-real ese ejemplar vive en Drive y el fichero local es una caché
+  reconstruible (igual que `data/staging/historico/`); en modo solo-local sigue
+  siendo el fichero de `data/raw/`, curado a mano y sin otra copia.
+- **Modo dual, no migración.** `DriveMonitor` **no cambia de interfaz** (sigue
+  siendo MD5 sobre un `Path`); lo único que cambia es qué carpeta vigila:
+  `data/staging/theory/` con el sync activado, `data/raw/books/`+`notes/` sin
+  él. El modo solo-local es el **defecto** y queda intacto — sirve al corpus ya
+  descargado a mano (`docs/CORPUS_INVENTORY.md`) y permite desarrollar y testear
+  sin credenciales. Activación por inyección en `run_pipeline` y flag
+  `--sync-drive` en el CLI (task 45).
+- **MIMEs de teoría:** PDF, DOCX, EPUB y TXT se descargan directos; los **Google
+  Docs nativos se exportan a `.docx`**, no a texto plano. Coincide con el
+  histórico pero por motivos propios: el `.docx` cae en `docx_parser` →
+  markitdown (P17), que conserva estructura, y en teoría la extensión `.txt`
+  está reservada al `whisperx_parser` (`src/theory/pipeline.py` deriva Parser y
+  `tipo_fuente` de la extensión), así que un export a `.txt` misenrutaría el
+  documento y lo etiquetaría como `transcripcion_curso`.
+- **`DRIVE_FOLDER_ID` se mantiene** (existía desde Fase 0, reservada para esto);
+  no se renombra a `DRIVE_FOLDER_ID_TEORIA`. La asimetría con
+  `DRIVE_FOLDER_ID_HISTORICO` es deliberada: renombrar solo compraría simetría
+  cosmética e invalidaría P19, `.env.example` y los `.env` ya rellenados. Las
+  credenciales (`GOOGLE_APPLICATION_CREDENTIALS`, cuenta de servicio, scope
+  `drive.readonly`, nunca OAuth interactivo) sí se comparten con el Flujo C.
+
+Detalle completo en [`src/theory/SPEC.md`](../../src/theory/SPEC.md) §Fuente de
+entrada — Drive real y modo dual, y en
+[`src/utils/SPEC.md`](../../src/utils/SPEC.md) §DriveSync.
 
 ## Metodología SDD + TDD (aplica a todo el proyecto)
 
