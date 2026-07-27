@@ -307,3 +307,178 @@ def test_run_pipeline_sin_ficheros_pendientes_no_falla(tmp_path):
     )
     assert resultado.ok
     assert resultado.version_dir is None
+
+
+# --- Drive real, etapa 0 y resolución de `carpetas` (task 45, P23) ----------
+#
+# Contrato exacto en `src/theory/SPEC.md` §"Fuente de entrada — Drive real y
+# modo dual (P23)" > "Activación (task 45)":
+#   - drive_sync=None + carpetas=None -> defaults locales (comportamiento de
+#     hoy, sin cambios).
+#   - drive_sync presente + carpetas=None -> [drive_sync.staging_dir] (el
+#     default local NO se añade).
+#   - carpetas explícito -> se respeta tal cual; si drive_sync está presente
+#     y su staging_dir no está ya en la lista, se añade.
+# `drive_sync` es duck-typed (`.sync() -> list[Path]`, `.staging_dir: Path`)
+# — los dobles de abajo no heredan de `DriveSyncTeoria` a propósito, para
+# mantener estos tests sin ninguna dependencia de `src.utils.drive_sync`
+# (google-api-python-client incluido).
+
+
+class _MonitorEspia:
+    """Doble de `DriveMonitor` que solo registra la carpeta con la que se
+    instancia y no encuentra nunca nada pendiente — para tests que solo
+    verifican la RESOLUCIÓN de `carpetas`, no el resto de la cadena (que ya
+    cubren los tests de arriba)."""
+
+    instancias: list = []
+
+    def __init__(self, folder, state_path):
+        type(self).instancias.append(folder)
+
+    def scan(self):
+        return []
+
+
+class _DriveSyncFake:
+    """Doble mínimo de `DriveSyncTeoria`: registra si `.sync()` se llamó y
+    expone `.staging_dir`. No descarga nada por defecto (subclases/usos
+    concretos abajo sobrescriben `sync()` cuando el test necesita dejar
+    ficheros reales en el staging)."""
+
+    def __init__(self, staging_dir: Path):
+        self.staging_dir = staging_dir
+        self.sync_llamado = False
+
+    def sync(self) -> list[Path]:
+        self.sync_llamado = True
+        return []
+
+
+def test_drive_sync_none_usa_los_defaults_locales_sin_cambios(tmp_path, monkeypatch):
+    """`drive_sync=None` (el caso de hoy, ni pasado ni inyectado) termina
+    vigilando exactamente `CARPETA_BOOKS_POR_DEFECTO`/`CARPETA_NOTES_POR_DEFECTO`
+    — comportamiento bit a bit igual que antes de esta tarea."""
+    books = tmp_path / "books"
+    notes = tmp_path / "notes"
+    books.mkdir()
+    notes.mkdir()
+    monkeypatch.setattr(pipeline_mod, "CARPETA_BOOKS_POR_DEFECTO", books)
+    monkeypatch.setattr(pipeline_mod, "CARPETA_NOTES_POR_DEFECTO", notes)
+    _MonitorEspia.instancias = []
+    monkeypatch.setattr(pipeline_mod, "DriveMonitor", _MonitorEspia)
+
+    resultado = run_pipeline(
+        None,
+        directorio_procesado=tmp_path / "processed",
+        ruta_estado=tmp_path / "state" / "processed_files.json",
+    )
+
+    assert resultado.ok
+    assert _MonitorEspia.instancias == [books, notes]
+
+
+def test_drive_sync_presente_y_carpetas_none_vigila_solo_el_staging_dir(tmp_path, monkeypatch):
+    """`drive_sync` presente + `carpetas=None` -> `[drive_sync.staging_dir]`;
+    el default local NO se añade (tabla de la SPEC)."""
+    staging_dir = tmp_path / "staging"
+    staging_dir.mkdir()
+    _MonitorEspia.instancias = []
+    monkeypatch.setattr(pipeline_mod, "DriveMonitor", _MonitorEspia)
+
+    fake = _DriveSyncFake(staging_dir)
+
+    resultado = run_pipeline(
+        None,
+        directorio_procesado=tmp_path / "processed",
+        ruta_estado=tmp_path / "state" / "processed_files.json",
+        drive_sync=fake,
+    )
+
+    assert resultado.ok
+    assert fake.sync_llamado is True
+    assert _MonitorEspia.instancias == [staging_dir]
+
+
+def test_carpetas_explicitas_incluyen_staging_dir_si_no_estaba(tmp_path, monkeypatch):
+    """`carpetas` explícito se respeta tal cual; el `staging_dir` de
+    `drive_sync` se añade al final si no estaba ya en la lista."""
+    carpeta_explicita = tmp_path / "custom"
+    carpeta_explicita.mkdir()
+    staging_dir = tmp_path / "staging"
+    staging_dir.mkdir()
+    _MonitorEspia.instancias = []
+    monkeypatch.setattr(pipeline_mod, "DriveMonitor", _MonitorEspia)
+
+    fake = _DriveSyncFake(staging_dir)
+
+    resultado = run_pipeline(
+        [carpeta_explicita],
+        directorio_procesado=tmp_path / "processed",
+        ruta_estado=tmp_path / "state" / "processed_files.json",
+        drive_sync=fake,
+    )
+
+    assert resultado.ok
+    assert fake.sync_llamado is True
+    assert _MonitorEspia.instancias == [carpeta_explicita, staging_dir]
+
+
+def test_carpetas_explicitas_no_duplican_staging_dir_si_ya_estaba(tmp_path, monkeypatch):
+    """Si `carpetas` explícito YA contiene el `staging_dir` de `drive_sync`,
+    no se duplica en la lista (un solo `DriveMonitor` para esa carpeta)."""
+    staging_dir = tmp_path / "staging"
+    staging_dir.mkdir()
+    _MonitorEspia.instancias = []
+    monkeypatch.setattr(pipeline_mod, "DriveMonitor", _MonitorEspia)
+
+    fake = _DriveSyncFake(staging_dir)
+
+    resultado = run_pipeline(
+        [staging_dir],
+        directorio_procesado=tmp_path / "processed",
+        ruta_estado=tmp_path / "state" / "processed_files.json",
+        drive_sync=fake,
+    )
+
+    assert resultado.ok
+    assert fake.sync_llamado is True
+    assert _MonitorEspia.instancias == [staging_dir]
+
+
+def test_etapa_0_sync_puebla_el_staging_antes_de_que_drivemonitor_escanee(tmp_path):
+    """La etapa 0 (`drive_sync.sync()`) debe completarse ANTES del loop de
+    `DriveMonitor` — se comprueba end-to-end (sin dobles de `DriveMonitor`):
+    `staging_dir` NO existe hasta que `sync()` lo crea y deja el fichero; si
+    el wiring llamara a `sync()` DESPUÉS de construir/escanear `DriveMonitor`,
+    la carpeta no existiría todavía en ese punto (`carpeta.exists()` sería
+    False) y el fichero nunca se procesaría."""
+
+    class _DriveSyncQueDejaFichero:
+        def __init__(self, staging_dir: Path):
+            self.staging_dir = staging_dir
+            self.sync_llamado = False
+
+        def sync(self) -> list[Path]:
+            self.sync_llamado = True
+            assert not self.staging_dir.exists()  # todavía no la creó nadie
+            self.staging_dir.mkdir(parents=True, exist_ok=True)
+            destino = self.staging_dir / "sample_transcript.txt"
+            shutil.copy(SAMPLE_TXT, destino)
+            return [destino]
+
+    staging_dir = tmp_path / "staging"
+    fake = _DriveSyncQueDejaFichero(staging_dir)
+
+    resultado = run_pipeline(
+        None,
+        directorio_procesado=tmp_path / "processed",
+        ruta_estado=tmp_path / "state" / "processed_files.json",
+        traductor=_traductor_fake,
+        drive_sync=fake,
+    )
+
+    assert fake.sync_llamado is True
+    assert resultado.ok
+    assert {p.name for p in resultado.procesados} == {"sample_transcript.txt"}
+    assert resultado.version_dir == tmp_path / "processed" / "v1"
