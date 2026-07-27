@@ -20,6 +20,7 @@ from src.jokes.supabase_store import (
     _build_chiste_payload,
     _build_chiste_update_payload,
     _build_mensaje_telegram_bronze_payload,
+    _build_telegram_bronze_procesado_payload,
     _build_revision_payload,
     _normalizar_tipo_fuente_candidatos,
     _parsear_embedding,
@@ -314,6 +315,35 @@ def test_build_mensaje_telegram_bronze_payload_requiere_campos_obligatorios():
 
 
 # ---------------------------------------------------------------------------
+# _build_telegram_bronze_procesado_payload (task 35, telegram/SPEC.md
+# §Recuperación de fallos — paso 11, marcado de `procesado_at`)
+# ---------------------------------------------------------------------------
+
+def test_build_telegram_bronze_procesado_payload_solo_tiene_procesado_at():
+    payload = _build_telegram_bronze_procesado_payload()
+    assert set(payload.keys()) == {"procesado_at"}
+
+
+def test_build_telegram_bronze_procesado_payload_no_toca_texto_raw_ni_otras_columnas():
+    """Bronze sagrado (CLAUDE.md): el UPDATE del paso 11 SOLO puede tocar
+    `procesado_at` — nunca `texto_raw`, `chat_id` ni ninguna otra columna del
+    mensaje original."""
+    payload = _build_telegram_bronze_procesado_payload()
+    assert "texto_raw" not in payload
+    assert "chat_id" not in payload
+    assert "telegram_update_id" not in payload
+
+
+def test_build_telegram_bronze_procesado_payload_es_timestamp_iso():
+    payload = _build_telegram_bronze_procesado_payload()
+    # No lanza al parsear — es un ISO 8601 válido (mismo formato que
+    # `_timestamp_actual`, usado también en `_build_chiste_update_payload`).
+    from datetime import datetime
+
+    datetime.fromisoformat(payload["procesado_at"])
+
+
+# ---------------------------------------------------------------------------
 # _normalizar_tipo_fuente_candidatos (task 25, §Reconciliación) — acepta
 # str o Sequence[str], valida cada valor contra TIPOS_FUENTE_CHISTE.
 # ---------------------------------------------------------------------------
@@ -536,3 +566,79 @@ def test_listar_candidatos_reconciliacion_rechaza_tipo_fuente_invalido():
 
     with pytest.raises(ValueError, match="tipo_fuente inválido"):
         store.listar_candidatos_reconciliacion("ajeno")
+
+
+# ---------------------------------------------------------------------------
+# SupabaseStore.marcar_telegram_bronze_procesado (task 35, telegram/SPEC.md
+# §Recuperación de fallos — paso 11) — doble de cliente en memoria, mismo
+# patrón que `_FakeClienteChistes`/`_FakeConsultaChistes` de arriba, adaptado
+# a la interfaz fluida de UPDATE (`.table(...).update(...).eq(...).execute()`).
+# ---------------------------------------------------------------------------
+
+class _FakeConsultaBronzeUpdate:
+    def __init__(self, filas):
+        self._filas = filas
+        self._payload = None
+        self._filtro_id = None
+
+    def update(self, payload):
+        self._payload = payload
+        return self
+
+    def eq(self, columna, valor):
+        assert columna == "id", "el UPDATE debe filtrar por id de la fila Bronze"
+        self._filtro_id = valor
+        return self
+
+    def execute(self):
+        assert set(self._payload.keys()) == {"procesado_at"}, (
+            "el UPDATE de chistes_telegram_bronze solo puede tocar procesado_at "
+            "(Bronze sagrado, CLAUDE.md)"
+        )
+        fila = next(f for f in self._filas if f["id"] == self._filtro_id)
+        fila.update(self._payload)
+        return _FakeResultado([fila])
+
+
+class _FakeClienteBronze:
+    def __init__(self, filas):
+        self._filas = filas
+
+    def table(self, nombre_tabla):
+        assert nombre_tabla == "chistes_telegram_bronze"
+        return _FakeConsultaBronzeUpdate(self._filas)
+
+
+def test_marcar_telegram_bronze_procesado_fija_timestamp():
+    filas = [{"id": 1, "texto_raw": "un chiste", "procesado_at": None}]
+    store = SupabaseStore(client=_FakeClienteBronze(filas))
+
+    resultado = store.marcar_telegram_bronze_procesado(1)
+
+    assert resultado["procesado_at"] is not None
+    assert resultado["id"] == 1
+
+
+def test_marcar_telegram_bronze_procesado_no_toca_texto_raw():
+    """Bronze sagrado (CLAUDE.md): el único apunte que vuelve a la tabla es
+    `procesado_at` — `texto_raw` (y cualquier otra columna del mensaje
+    original) queda intacto."""
+    filas = [{"id": 1, "texto_raw": "un chiste literal", "procesado_at": None}]
+    store = SupabaseStore(client=_FakeClienteBronze(filas))
+
+    store.marcar_telegram_bronze_procesado(1)
+
+    assert filas[0]["texto_raw"] == "un chiste literal"
+
+
+def test_marcar_telegram_bronze_procesado_filtra_por_id_correcto():
+    filas = [
+        {"id": 1, "texto_raw": "chiste 1", "procesado_at": None},
+        {"id": 2, "texto_raw": "chiste 2", "procesado_at": None},
+    ]
+    store = SupabaseStore(client=_FakeClienteBronze(filas))
+
+    store.marcar_telegram_bronze_procesado(2)
+
+    assert filas[0]["procesado_at"] is None  # la fila 1 no se tocó
+    assert filas[1]["procesado_at"] is not None
