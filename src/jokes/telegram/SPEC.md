@@ -282,6 +282,53 @@ task 33 (spec) y la task 34 (implementación). Esta spec solo fija **que** el
 Flujo B rutea a través de ese módulo compartido, no cómo se llama su función ni
 qué argumentos recibe.
 
+## Recuperación de fallos
+
+La decisión de responder `200` a Telegram **antes** de ejecutar el tramo caro
+(Silver → taxonomías → reconciliación → routing, paso 7-11) tiene una
+contrapartida obligatoria: si el tramo background falla o el proceso muere
+entre medias, **Telegram no reintenta** (ya recibió su 2xx) y el mensaje queda
+atrapado en Bronze sin llegar a `chistes`. Este mecanismo es la solución.
+
+### Columna `procesado_at` en `chistes_telegram_bronze`
+
+- **Qué es:** campo nullable de tipo `timestamptz` en la tabla Bronze. `NULL`
+  significa "evento insertado en Bronze pero el tramo caro no ha completado";
+  un timestamp significa "la cadena entera (paso 11) terminó con éxito".
+- **Cómo se marca:** `telegram/pipeline.py` (task 35) es responsable de fijar
+  `procesado_at` a un timestamp **solo cuando** el paso 11 (routing a Supabase
+  completado sin excepción) termina. Si cualquier paso de 7-11 falla, el campo
+  queda `NULL` y se loga la excepción — no se intenta un UPDATE parcial.
+- **Por qué al final y no al principio:** si se marcara en el paso 5 (Bronze),
+  un fallo posterior nunca se detectaría — el punto entero de la columna es
+  **señalar precisamente lo contrario**, que el pipeline aún está incompleto.
+  Solo el paso 11 garantiza que todo terminó, de modo que solo ahí se marca.
+- **Respeta la regla de Bronze inmutable:** esta columna **no reescribe**
+  `texto_raw` ni ningún dato del mensaje original; es un campo de **estado de
+  progreso** agregado a la tabla, usando el mismo patrón que otros mecanismos
+  de idempotencia del proyecto (`processed_files.json` en Flujo A, metadata de
+  Drive en `drive_source.py`) — la idea es separación clara: dato vs. estado.
+
+### Script de reproceso — `scripts/reprocesar_bronze_pendiente.py` (task 47)
+
+Encargado de recuperar los eventos atrapados (aquellos con `procesado_at IS
+NULL`). No se diseña aquí en detalle (es la task 47), pero el contrato es fijo:
+
+- Selecciona de `chistes_telegram_bronze WHERE procesado_at IS NULL`.
+- Para cada evento, **reutiliza la misma cadena** que usa el webhook:
+  `telegram/pipeline.py` es importable y testeable sin HTTP, así que el script
+  la llama directamente (no reinventa la lógica de Silver/Reconciliación/Routing).
+- Marca `procesado_at` al completar cada evento con éxito — es el **mismo punto
+  de marcado** que usa el webhook (paso 11), no un mecanismo distinto.
+
+### Ausencia de reintentos automáticos
+
+Esta tarea **no introduce un cron ni un retry-loop automático**: no hay job
+schedulado que ejecute `reprocesar_bronze_pendiente.py` de forma repetida. El
+reproceso es un script manual o programado aparte, fuera de este alcance. Si
+algún día entra, entra por spec (nueva sección `##` en este fichero), no por
+defecto del transporte.
+
 ## Idempotencia y versionado
 
 Idempotencia **por evento** (`telegram_update_id`), no por documento (a

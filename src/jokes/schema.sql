@@ -109,6 +109,7 @@ create table if not exists chistes_telegram_bronze (
   chat_id            bigint,
   texto_raw          text not null,                 -- literal, sagrado, nunca se reescribe
   timestamp_telegram timestamptz,                   -- fecha del mensaje según Telegram
+  procesado_at       timestamptz,                   -- bookkeeping: NULL hasta que pipeline completó (recuperación post-200, task 46/47)
   created_at         timestamptz not null default now()
 );
 
