@@ -642,3 +642,89 @@ def test_marcar_telegram_bronze_procesado_filtra_por_id_correcto():
 
     assert filas[0]["procesado_at"] is None  # la fila 1 no se tocó
     assert filas[1]["procesado_at"] is not None
+
+
+# ---------------------------------------------------------------------------
+# SupabaseStore.listar_telegram_bronze_pendientes (task 47, telegram/SPEC.md
+# §"Recuperación de fallos" — script de reproceso) — doble de cliente en
+# memoria, mismo patrón de estilo que `_FakeConsultaChistes`
+# (`listar_candidatos_reconciliacion`, task 25): select mínimo, nunca
+# `select('*')`, filtrado por `procesado_at IS NULL`.
+# ---------------------------------------------------------------------------
+
+class _FakeConsultaBronzePendientes:
+    """Doble mínimo de la interfaz fluida de `supabase-py` usada por el
+    método: `.table("chistes_telegram_bronze").select(...).is_("procesado_at",
+    "null").execute()`."""
+
+    def __init__(self, filas):
+        self._filas = filas
+        self._columnas_seleccionadas = None
+        self._filtro_is_null = None
+
+    def select(self, columnas):
+        self._columnas_seleccionadas = columnas
+        return self
+
+    def is_(self, columna, valor):
+        assert valor == "null", "el filtro debe pedir procesado_at IS NULL"
+        self._filtro_is_null = columna
+        return self
+
+    def execute(self):
+        assert self._columnas_seleccionadas == "id, texto_raw", (
+            "listar_telegram_bronze_pendientes debe pedir SOLO id, texto_raw "
+            "(no select('*'))"
+        )
+        assert self._filtro_is_null == "procesado_at"
+        filas = [f for f in self._filas if f.get("procesado_at") is None]
+        return _FakeResultado(filas)
+
+
+class _FakeClienteBronzePendientes:
+    def __init__(self, filas):
+        self._filas = filas
+
+    def table(self, nombre_tabla):
+        assert nombre_tabla == "chistes_telegram_bronze"
+        return _FakeConsultaBronzePendientes(self._filas)
+
+
+def test_listar_telegram_bronze_pendientes_filtra_por_procesado_at_null():
+    filas = [
+        {"id": 1, "texto_raw": "chiste 1", "procesado_at": None},
+        {"id": 2, "texto_raw": "chiste 2", "procesado_at": "2024-01-01T00:00:00+00:00"},
+        {"id": 3, "texto_raw": "chiste 3", "procesado_at": None},
+    ]
+    store = SupabaseStore(client=_FakeClienteBronzePendientes(filas))
+
+    pendientes = store.listar_telegram_bronze_pendientes()
+
+    assert {p["id"] for p in pendientes} == {1, 3}
+
+
+def test_listar_telegram_bronze_pendientes_devuelve_solo_id_y_texto_raw():
+    filas = [
+        {
+            "id": 1,
+            "texto_raw": "chiste 1",
+            "procesado_at": None,
+            "chat_id": 555,
+            "telegram_update_id": 999,
+        }
+    ]
+    store = SupabaseStore(client=_FakeClienteBronzePendientes(filas))
+
+    pendientes = store.listar_telegram_bronze_pendientes()
+
+    assert pendientes == [{"id": 1, "texto_raw": "chiste 1"}]
+    assert set(pendientes[0].keys()) == {"id", "texto_raw"}
+
+
+def test_listar_telegram_bronze_pendientes_sin_pendientes_devuelve_lista_vacia():
+    filas = [
+        {"id": 1, "texto_raw": "chiste 1", "procesado_at": "2024-01-01T00:00:00+00:00"},
+    ]
+    store = SupabaseStore(client=_FakeClienteBronzePendientes(filas))
+
+    assert store.listar_telegram_bronze_pendientes() == []

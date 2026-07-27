@@ -550,3 +550,34 @@ class SupabaseStore:
             .execute()
         )
         return resultado.data[0]
+
+    def listar_telegram_bronze_pendientes(self) -> list:
+        """Eventos de `chistes_telegram_bronze` con `procesado_at IS NULL`
+        (task 47, `telegram/SPEC.md` §"Recuperación de fallos" — script de
+        reproceso).
+
+        Único caller esperado: `scripts/reprocesar_bronze_pendiente.py`, que
+        recorre estas filas para reintentar el tramo caro
+        (`telegram/pipeline.py::procesar_evento_background`) sobre eventos
+        que ya pasaron por Bronze pero cuyo tramo background falló o quedó a
+        medias (§"Recuperación de fallos").
+
+        Mismo criterio de "select mínimo, nunca `select('*')`" que
+        `listar_candidatos_reconciliacion` (task 25): **exactamente** las dos
+        claves que el script de reproceso consume — `id` (para
+        `procesar_evento_background`/`marcar_telegram_bronze_procesado`) y
+        `texto_raw` (para recalcular `texto_limpio` vía
+        `limpiar_texto_telegram`, nunca se reprocesa el crudo directamente).
+        No se pide `procesado_at` de vuelta: ya se sabe que es `NULL` por el
+        propio filtro.
+        """
+        resultado = (
+            self.client.table("chistes_telegram_bronze")
+            .select("id, texto_raw")
+            .is_("procesado_at", "null")
+            .execute()
+        )
+        return [
+            {"id": fila["id"], "texto_raw": fila["texto_raw"]}
+            for fila in resultado.data
+        ]
