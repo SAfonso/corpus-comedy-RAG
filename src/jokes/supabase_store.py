@@ -322,6 +322,21 @@ def _build_mensaje_telegram_bronze_payload(
     return payload
 
 
+def _build_telegram_bronze_procesado_payload() -> dict:
+    """Payload de UPDATE para marcar `procesado_at` en `chistes_telegram_bronze`
+    (task 35/46, `telegram/SPEC.md` §Recuperación de fallos — paso 11).
+
+    Deliberadamente el payload más estrecho posible: **solo** `procesado_at`.
+    Nunca incluye `texto_raw` ni ninguna otra columna del mensaje original —
+    Bronze es sagrado (`CLAUDE.md`), y este es el único UPDATE permitido sobre
+    esa tabla. Se marca solo cuando el tramo background (Silver → taxonomías
+    → reconciliación → routing) completó sin excepción; si cualquier paso
+    falla, no se llama a este builder y la fila queda `NULL` (ver
+    `telegram/pipeline.py`).
+    """
+    return {"procesado_at": _timestamp_actual()}
+
+
 # ---------------------------------------------------------------------------
 # Cliente Supabase — capa fina sobre supabase-py. Solo habla con tablas ya
 # existentes (ver docstring del módulo); nunca ejecuta DDL.
@@ -509,3 +524,29 @@ class SupabaseStore:
             .execute()
         )
         return resultado.data[0] if resultado.data else None
+
+    def marcar_telegram_bronze_procesado(self, fila_id: Any) -> dict:
+        """Marca `procesado_at=now()` en UNA fila de `chistes_telegram_bronze`
+        (task 35/46, `telegram/SPEC.md` §Recuperación de fallos — paso 11).
+
+        Único caller esperado: `telegram/pipeline.py`, y solo tras completar
+        con éxito el tramo background entero (Silver → taxonomías →
+        reconciliación → routing) — nunca antes, nunca en un UPDATE parcial.
+        Mismo punto de marcado tanto si lo invoca el webhook (tras el 200,
+        task 36) como el script de reproceso de eventos pendientes (task 47).
+
+        `fila_id` es el `id` de la fila en `chistes_telegram_bronze` (el que
+        devuelve `guardar_mensaje_telegram_bronze`). El payload construido por
+        `_build_telegram_bronze_procesado_payload` es deliberadamente el más
+        estrecho posible (`{"procesado_at": ...}`) — Bronze es sagrado
+        (`CLAUDE.md`), este método nunca toca `texto_raw` ni ninguna otra
+        columna del mensaje original.
+        """
+        payload = _build_telegram_bronze_procesado_payload()
+        resultado = (
+            self.client.table("chistes_telegram_bronze")
+            .update(payload)
+            .eq("id", fila_id)
+            .execute()
+        )
+        return resultado.data[0]
