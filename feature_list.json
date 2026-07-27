@@ -1,50 +1,563 @@
 [
-  { "id": 1,  "title": "Inicializar entorno: .env desde .env.example, dependencias, bash init.sh en verde", "module": "raíz", "status": "done", "priority": "high", "complejidad": "baja", "depends_on": [] },
-  { "id": 2,  "title": "Flujo A: DriveMonitor sobre carpeta local data/raw/books|notes/ (P18, Drive API real diferida), idempotencia por hash MD5 (processed_files.json)", "module": "src/theory", "status": "done", "priority": "high", "complejidad": "media", "depends_on": [1] },
-  { "id": 3,  "title": "Flujo A: whisperx_parser — quitar timestamps/speaker tags, conservar speaker dominante como metadato", "module": "src/theory/parsers", "status": "done", "priority": "high", "complejidad": "media", "depends_on": [1] },
-  { "id": 4,  "title": "Flujo A: pdf_parser con markitdown (P17), fallback OCR Tesseract para páginas escaneadas", "module": "src/theory/parsers", "status": "done", "priority": "high", "complejidad": "media", "depends_on": [1] },
-  { "id": 5,  "title": "Flujo A: epub_parser — markitdown (P17) si cubre EPUB con calidad suficiente, si no ebooklib", "module": "src/theory/parsers", "status": "done", "priority": "medium", "complejidad": "baja", "depends_on": [1] },
-  { "id": 6,  "title": "Flujo A: docx_parser con markitdown (P17)", "module": "src/theory/parsers", "status": "done", "priority": "medium", "complejidad": "baja", "depends_on": [1] },
-  { "id": 7,  "title": "Flujo A: SubtypeDetector (explicacion|ejemplo) — se ejecuta ANTES que el Cleaner", "module": "src/theory", "status": "done", "priority": "high", "complejidad": "media", "depends_on": [3, 4, 5, 6] },
-  { "id": 8,  "title": "Flujo A: Cleaner agresivo solo para subtipo=explicacion", "module": "src/theory", "status": "done", "priority": "high", "complejidad": "media", "depends_on": [7] },
-  { "id": 9,  "title": "Flujo A: LanguageDetector + LanguageNormalizer (teoría a español, ejemplos en idioma original)", "module": "src/theory", "status": "done", "priority": "medium", "complejidad": "media", "depends_on": [7] },
-  { "id": 10, "title": "Flujo A: QualityScorer (score 0-1 de densidad de contenido útil)", "module": "src/theory", "status": "done", "priority": "medium", "complejidad": "media", "depends_on": [8] },
-  { "id": 11, "title": "Flujo A: FormatNormalizer + salida /data/processed/v{N}/ con cabecera YAML y manifest.json inmutable", "module": "src/theory", "status": "done", "priority": "high", "complejidad": "media", "depends_on": [8, 9, 10] },
-  { "id": 12, "title": "Contrato B/C: supabase_store.py + DDL de tablas (chistes, revisiones, taxonomías, candidatos)", "module": "src/jokes", "status": "done", "priority": "high", "complejidad": "media", "depends_on": [1] },
-  { "id": 13, "title": "Contrato B/C: silver.py — estructuración por LLM (tema, estructura, estado, sugerencias, normalizado)", "module": "src/jokes", "status": "done", "priority": "high", "complejidad": "media", "depends_on": [12] },
-  { "id": 14, "title": "Contrato B/C: mapeo de taxonomías con loop acotado P16 (≤3 intentos, cola candidatos_taxonomia)", "module": "src/jokes", "status": "done", "priority": "medium", "complejidad": "media", "depends_on": [13] },
-  { "id": 15, "title": "Contrato B/C: reconciliacion.py — dedup híbrido hash + embedding (IGUAL/CAMBIADO/NUEVO)", "module": "src/jokes", "status": "done", "priority": "high", "complejidad": "media", "depends_on": [13] },
-  { "id": 16, "title": "Flujo B: telegram_bot.py — Bronze inmutable, idempotencia por telegram_update_id, pre-limpieza mínima", "module": "src/jokes/telegram", "status": "done", "priority": "medium", "complejidad": "media", "depends_on": [13] },
-  { "id": 17, "title": "Flujo C: scripts/marcar_remates.py — color→[REMATE]/[CHISTOIDE] con validación round-trip", "module": "src/jokes/historico", "status": "done", "priority": "medium", "complejidad": "media", "depends_on": [1] },
-  { "id": 18, "title": "Flujo C: loader.py con idempotencia por hash MD5 de documento", "module": "src/jokes/historico", "status": "done", "priority": "medium", "complejidad": "baja", "depends_on": [17] },
-  { "id": 19, "title": "Flujo C: segmentador.py — diseño del prompt de inicio de setup (juicio semántico, sin loop, revisión humana muestral)", "module": "src/jokes/historico", "status": "done", "priority": "medium", "complejidad": "alta", "depends_on": [17, 13] },
-  { "id": 20, "title": "scripts/validate_corpus.py operativo como gate previo a cada commit", "module": "scripts", "status": "done", "priority": "high", "complejidad": "media", "depends_on": [11] },
-  { "id": 21, "title": "Ingesta de /data/processed/v{N}/ a Supabase (teoria_chunks + índice pgvector compartido)", "module": "src/theory", "status": "done", "priority": "medium", "complejidad": "media", "depends_on": [11, 12] },
-  { "id": 22, "title": "Flujo A: theory/pipeline.py — módulo orquestador importable (DriveMonitor→Parser→SubtypeDetector→Cleaner→Language→QualityScorer→generar_version), reanudación por processed_files.json", "module": "src/theory", "status": "done", "priority": "high", "complejidad": "media", "depends_on": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11] },
-  { "id": 23, "title": "Flujo A: scripts/run_pipeline.py — CLI estable para consumidor externo (RAG por subprocess): invoca pipeline.py, --ingest→ingestar_version, exit codes fiables + resumen JSON", "module": "scripts", "status": "done", "priority": "high", "complejidad": "media", "depends_on": [22, 21] },
-  { "id": 24, "title": "Contrato B/C: spec del método de SupabaseStore para obtener candidatos de reconciliación filtrados por tipo_fuente (src/jokes/SPEC.md §Reconciliación)", "module": "src/jokes", "status": "done", "priority": "high", "complejidad": "alta", "depends_on": [15] },
-  { "id": 25, "title": "Contrato B/C: implementar en supabase_store.py el método de fetch de candidatos definido en la task 24", "module": "src/jokes", "status": "done", "priority": "high", "complejidad": "media", "depends_on": [24, 12] },
-  { "id": 26, "title": "Flujo C: historico/coste.py — dry-run de estimación de tokens + gate de presupuesto antes del run completo (llm-policy.md §Control de coste)", "module": "src/jokes/historico", "status": "done", "priority": "high", "complejidad": "media", "depends_on": [18, 19, 13] },
-  { "id": 27, "title": "Flujo C: historico/pipeline.py — módulo orquestador importable (drive_source→marcar_remates→Loader→Segmentador→Silver→resolver_taxonomia→reconciliar_chiste→routing IGUAL/CAMBIADO/NUEVO a Supabase), reanudación por documento", "module": "src/jokes/historico", "status": "done", "priority": "high", "complejidad": "alta", "depends_on": [30, 17, 18, 19, 13, 14, 15, 12, 25] },
-  { "id": 28, "title": "Flujo C: scripts/run_historico.py — CLI estable para consumidor externo (RAG por subprocess): ejecuta gate de la task 26 (--dry-run), luego pipeline.py; exit codes 0/1/2 (éxito/fallo/abort-por-coste) + resumen JSON", "module": "scripts", "status": "done", "priority": "high", "complejidad": "media", "depends_on": [26, 27] },
-  { "id": 29, "title": "Flujo C: spec de integración Drive real (jokes/historico/SPEC.md + nota en 00-overview.md) — fuente pasa de .docx local a carpeta Drive real, descarga a staging local, marcar_remates conserva firma local", "module": "src/jokes/historico", "status": "done", "priority": "high", "complejidad": "alta", "depends_on": [17] },
-  { "id": 30, "title": "Flujo C: historico/drive_source.py — lista carpeta Drive real y descarga .docx nuevos/modificados a staging, idempotencia por metadata Drive (fileId+modifiedTime/md5)", "module": "src/jokes/historico", "status": "done", "priority": "high", "complejidad": "media", "depends_on": [29] },
-  { "id": 31, "title": "Flujo C: .github/workflows/run_historico_semanal.yml — trigger schedule cron semanal, secrets de Supabase/Drive/LLM, ejecuta run_historico.py; documenta la decisión en 00-overview.md", "module": "scripts", "status": "done", "priority": "medium", "complejidad": "media", "depends_on": [28] },
-
-  { "id": 32, "title": "Flujo B: spec del transporte webhook y la orquestación end-to-end (telegram/SPEC.md §Transporte + §Orquestación, P22 en 00-overview.md) — webhook vs polling, 200-antes-del-Silver con tramo LLM en background, secret_token, allowlist de chat_id evaluada antes de Bronze, ausencia de gate de coste batch (idempotencia+allowlist como controles primarios, rate-limit fuera de esta ronda)", "module": "src/jokes/telegram", "status": "done", "priority": "high", "complejidad": "alta", "depends_on": [16] },
-  { "id": 33, "title": "Contrato B/C: spec del routing IGUAL/CAMBIADO/NUEVO a Supabase como componente compartido (src/jokes/SPEC.md §Routing) — interfaz parametrizada por tipo_fuente, qué se extrae de historico/pipeline.py sin cambiar su comportamiento", "module": "src/jokes", "status": "done", "priority": "high", "complejidad": "alta", "depends_on": [27, 32] },
-  { "id": 34, "title": "Contrato B/C: src/jokes/routing.py — extrae _rutear_a_supabase de historico/pipeline.py a un módulo compartido; historico/pipeline.py delega sin cambio de comportamiento (tests de la task 27 en verde sin modificarse)", "module": "src/jokes", "status": "done", "priority": "high", "complejidad": "media", "depends_on": [33] },
-  { "id": 35, "title": "Flujo B: telegram/pipeline.py — orquestador importable (allowlist chat_id → Bronze → pre-limpieza → Silver → resolver_taxonomia → reconciliar_chiste → routing.py, tipo_fuente='propio'); marca procesado_at en Bronze al completar con éxito (mismo punto de marcado que usará el reproceso de la task 47)", "module": "src/jokes/telegram", "status": "done", "priority": "high", "complejidad": "media", "depends_on": [32, 34, 16, 13, 14, 15, 25, 46] },
-  { "id": 36, "title": "Flujo B: telegram/webhook_app.py — app FastAPI (POST /telegram/webhook con validación de X-Telegram-Bot-Api-Secret-Token, responde 200 tras Bronze, tramo Silver/reconciliación en BackgroundTasks, GET /health), tests con TestClient sin red", "module": "src/jokes/telegram", "status": "done", "priority": "high", "complejidad": "media", "depends_on": [32, 35] },
-  { "id": 37, "title": "Flujo B: scripts/set_telegram_webhook.py — registro one-shot re-ejecutable del webhook (setWebhook con secret_token y allowed_updates, getWebhookInfo de verificación, --delete), exit codes fiables + resumen JSON", "module": "scripts", "status": "done", "priority": "medium", "complejidad": "media", "depends_on": [32] },
-  { "id": 38, "title": "Flujo B: deploy/Dockerfile + docker-compose.yml + .dockerignore — servicio webhook en contenedor (uvicorn, puerto interno, env_file, restart policy, healthcheck contra /health)", "module": "deploy", "status": "done", "priority": "high", "complejidad": "media", "depends_on": [36] },
-  { "id": 39, "title": "Flujo B: deploy/Caddyfile + servicio de proxy en docker-compose — reverse proxy con TLS automático (ACME) delante del contenedor webhook, expuesto en el puerto 8443 (443/80 ya ocupados por Coolify en el VPS, decisión explícita para no tocar lo que Coolify gestiona)", "module": "deploy", "status": "pending", "priority": "high", "complejidad": "media", "depends_on": [38] },
-  { "id": 40, "title": "Flujo B: .github/workflows/deploy_telegram_webhook.yml — job de tests (pytest tests/unit/) como gate + deploy por SSH al VPS con docker compose up -d --build; documenta la decisión en 00-overview.md", "module": "scripts", "status": "pending", "priority": "medium", "complejidad": "media", "depends_on": [38, 39] },
-  { "id": 41, "title": "Flujo B: deploy/README.md — runbook operativo (bootstrap del .env de producción en el VPS, primer arranque, registro del webhook contra el puerto 8443, rotación del secret, verificación con getWebhookInfo, dónde mirar logs)", "module": "deploy", "status": "pending", "priority": "medium", "complejidad": "baja", "depends_on": [37, 39, 40] },
-  { "id": 42, "title": "Flujo A: spec del cierre de P18 — Drive real deja de estar diferido (src/theory/SPEC.md §DriveMonitor reescrita, src/utils/SPEC.md §DriveSync compartido, P23 en 00-overview.md); núcleo común extraído de historico/drive_source.py, MIMEs de teoría, y descarga a staging propio (data/staging/theory/, NO directo a data/raw/ — material sagrado, ver CLAUDE.md)", "module": "src/theory", "status": "pending", "priority": "high", "complejidad": "alta", "depends_on": [30, 2] },
-  { "id": 43, "title": "Compartido: src/utils/drive_sync.py — núcleo de sync de carpeta Drive real (auth por cuenta de servicio, listado paginado, idempotencia por fileId+modifiedTime, staging local) parametrizado por MIMEs aceptados y política de export; historico/drive_source.py delega sin cambio de comportamiento", "module": "src/utils", "status": "pending", "priority": "high", "complejidad": "media", "depends_on": [42, 30] },
-  { "id": 44, "title": "Flujo A: theory/drive_sync.py — especialización de teoría sobre src/utils/drive_sync.py (MIMEs pdf/docx/epub/txt + export de Google Docs nativos, DRIVE_FOLDER_ID, staging propio), tests sin red con cliente de Drive inyectado", "module": "src/theory", "status": "pending", "priority": "high", "complejidad": "media", "depends_on": [43] },
-  { "id": 45, "title": "Flujo A: wiring del sync de Drive en theory/pipeline.py + scripts/run_pipeline.py (etapa 0 previa a DriveMonitor, activable por flag/inyección, modo solo-local intacto), sin tocar el resto de la cadena", "module": "src/theory", "status": "pending", "priority": "high", "complejidad": "media", "depends_on": [44, 22, 23] },
-  { "id": 46, "title": "Flujo B: schema.sql añade procesado_at (nullable) a chistes_telegram_bronze + spec del mecanismo de recuperación post-200 (telegram/SPEC.md §Recuperación de fallos) — no toca texto_raw ni ninguna columna del mensaje original, solo bookkeeping de si ya completó el pipeline", "module": "src/jokes/telegram", "status": "done", "priority": "high", "complejidad": "baja", "depends_on": [32] },
-  { "id": 47, "title": "Flujo B: scripts/reprocesar_bronze_pendiente.py — reprocesa mensajes de chistes_telegram_bronze con procesado_at NULL a través de telegram/pipeline.py (task 35), marca procesado_at al completar cada uno con éxito, exit codes fiables + resumen JSON", "module": "scripts", "status": "pending", "priority": "medium", "complejidad": "media", "depends_on": [35, 46] }
+  {
+    "id": 1,
+    "title": "Inicializar entorno: .env desde .env.example, dependencias, bash init.sh en verde",
+    "module": "raíz",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "baja",
+    "depends_on": []
+  },
+  {
+    "id": 2,
+    "title": "Flujo A: DriveMonitor sobre carpeta local data/raw/books|notes/ (P18, Drive API real diferida), idempotencia por hash MD5 (processed_files.json)",
+    "module": "src/theory",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "media",
+    "depends_on": [
+      1
+    ]
+  },
+  {
+    "id": 3,
+    "title": "Flujo A: whisperx_parser — quitar timestamps/speaker tags, conservar speaker dominante como metadato",
+    "module": "src/theory/parsers",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "media",
+    "depends_on": [
+      1
+    ]
+  },
+  {
+    "id": 4,
+    "title": "Flujo A: pdf_parser con markitdown (P17), fallback OCR Tesseract para páginas escaneadas",
+    "module": "src/theory/parsers",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "media",
+    "depends_on": [
+      1
+    ]
+  },
+  {
+    "id": 5,
+    "title": "Flujo A: epub_parser — markitdown (P17) si cubre EPUB con calidad suficiente, si no ebooklib",
+    "module": "src/theory/parsers",
+    "status": "done",
+    "priority": "medium",
+    "complejidad": "baja",
+    "depends_on": [
+      1
+    ]
+  },
+  {
+    "id": 6,
+    "title": "Flujo A: docx_parser con markitdown (P17)",
+    "module": "src/theory/parsers",
+    "status": "done",
+    "priority": "medium",
+    "complejidad": "baja",
+    "depends_on": [
+      1
+    ]
+  },
+  {
+    "id": 7,
+    "title": "Flujo A: SubtypeDetector (explicacion|ejemplo) — se ejecuta ANTES que el Cleaner",
+    "module": "src/theory",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "media",
+    "depends_on": [
+      3,
+      4,
+      5,
+      6
+    ]
+  },
+  {
+    "id": 8,
+    "title": "Flujo A: Cleaner agresivo solo para subtipo=explicacion",
+    "module": "src/theory",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "media",
+    "depends_on": [
+      7
+    ]
+  },
+  {
+    "id": 9,
+    "title": "Flujo A: LanguageDetector + LanguageNormalizer (teoría a español, ejemplos en idioma original)",
+    "module": "src/theory",
+    "status": "done",
+    "priority": "medium",
+    "complejidad": "media",
+    "depends_on": [
+      7
+    ]
+  },
+  {
+    "id": 10,
+    "title": "Flujo A: QualityScorer (score 0-1 de densidad de contenido útil)",
+    "module": "src/theory",
+    "status": "done",
+    "priority": "medium",
+    "complejidad": "media",
+    "depends_on": [
+      8
+    ]
+  },
+  {
+    "id": 11,
+    "title": "Flujo A: FormatNormalizer + salida /data/processed/v{N}/ con cabecera YAML y manifest.json inmutable",
+    "module": "src/theory",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "media",
+    "depends_on": [
+      8,
+      9,
+      10
+    ]
+  },
+  {
+    "id": 12,
+    "title": "Contrato B/C: supabase_store.py + DDL de tablas (chistes, revisiones, taxonomías, candidatos)",
+    "module": "src/jokes",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "media",
+    "depends_on": [
+      1
+    ]
+  },
+  {
+    "id": 13,
+    "title": "Contrato B/C: silver.py — estructuración por LLM (tema, estructura, estado, sugerencias, normalizado)",
+    "module": "src/jokes",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "media",
+    "depends_on": [
+      12
+    ]
+  },
+  {
+    "id": 14,
+    "title": "Contrato B/C: mapeo de taxonomías con loop acotado P16 (≤3 intentos, cola candidatos_taxonomia)",
+    "module": "src/jokes",
+    "status": "done",
+    "priority": "medium",
+    "complejidad": "media",
+    "depends_on": [
+      13
+    ]
+  },
+  {
+    "id": 15,
+    "title": "Contrato B/C: reconciliacion.py — dedup híbrido hash + embedding (IGUAL/CAMBIADO/NUEVO)",
+    "module": "src/jokes",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "media",
+    "depends_on": [
+      13
+    ]
+  },
+  {
+    "id": 16,
+    "title": "Flujo B: telegram_bot.py — Bronze inmutable, idempotencia por telegram_update_id, pre-limpieza mínima",
+    "module": "src/jokes/telegram",
+    "status": "done",
+    "priority": "medium",
+    "complejidad": "media",
+    "depends_on": [
+      13
+    ]
+  },
+  {
+    "id": 17,
+    "title": "Flujo C: scripts/marcar_remates.py — color→[REMATE]/[CHISTOIDE] con validación round-trip",
+    "module": "src/jokes/historico",
+    "status": "done",
+    "priority": "medium",
+    "complejidad": "media",
+    "depends_on": [
+      1
+    ]
+  },
+  {
+    "id": 18,
+    "title": "Flujo C: loader.py con idempotencia por hash MD5 de documento",
+    "module": "src/jokes/historico",
+    "status": "done",
+    "priority": "medium",
+    "complejidad": "baja",
+    "depends_on": [
+      17
+    ]
+  },
+  {
+    "id": 19,
+    "title": "Flujo C: segmentador.py — diseño del prompt de inicio de setup (juicio semántico, sin loop, revisión humana muestral)",
+    "module": "src/jokes/historico",
+    "status": "done",
+    "priority": "medium",
+    "complejidad": "alta",
+    "depends_on": [
+      17,
+      13
+    ]
+  },
+  {
+    "id": 20,
+    "title": "scripts/validate_corpus.py operativo como gate previo a cada commit",
+    "module": "scripts",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "media",
+    "depends_on": [
+      11
+    ]
+  },
+  {
+    "id": 21,
+    "title": "Ingesta de /data/processed/v{N}/ a Supabase (teoria_chunks + índice pgvector compartido)",
+    "module": "src/theory",
+    "status": "done",
+    "priority": "medium",
+    "complejidad": "media",
+    "depends_on": [
+      11,
+      12
+    ]
+  },
+  {
+    "id": 22,
+    "title": "Flujo A: theory/pipeline.py — módulo orquestador importable (DriveMonitor→Parser→SubtypeDetector→Cleaner→Language→QualityScorer→generar_version), reanudación por processed_files.json",
+    "module": "src/theory",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "media",
+    "depends_on": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ]
+  },
+  {
+    "id": 23,
+    "title": "Flujo A: scripts/run_pipeline.py — CLI estable para consumidor externo (RAG por subprocess): invoca pipeline.py, --ingest→ingestar_version, exit codes fiables + resumen JSON",
+    "module": "scripts",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "media",
+    "depends_on": [
+      22,
+      21
+    ]
+  },
+  {
+    "id": 24,
+    "title": "Contrato B/C: spec del método de SupabaseStore para obtener candidatos de reconciliación filtrados por tipo_fuente (src/jokes/SPEC.md §Reconciliación)",
+    "module": "src/jokes",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "alta",
+    "depends_on": [
+      15
+    ]
+  },
+  {
+    "id": 25,
+    "title": "Contrato B/C: implementar en supabase_store.py el método de fetch de candidatos definido en la task 24",
+    "module": "src/jokes",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "media",
+    "depends_on": [
+      24,
+      12
+    ]
+  },
+  {
+    "id": 26,
+    "title": "Flujo C: historico/coste.py — dry-run de estimación de tokens + gate de presupuesto antes del run completo (llm-policy.md §Control de coste)",
+    "module": "src/jokes/historico",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "media",
+    "depends_on": [
+      18,
+      19,
+      13
+    ]
+  },
+  {
+    "id": 27,
+    "title": "Flujo C: historico/pipeline.py — módulo orquestador importable (drive_source→marcar_remates→Loader→Segmentador→Silver→resolver_taxonomia→reconciliar_chiste→routing IGUAL/CAMBIADO/NUEVO a Supabase), reanudación por documento",
+    "module": "src/jokes/historico",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "alta",
+    "depends_on": [
+      30,
+      17,
+      18,
+      19,
+      13,
+      14,
+      15,
+      12,
+      25
+    ]
+  },
+  {
+    "id": 28,
+    "title": "Flujo C: scripts/run_historico.py — CLI estable para consumidor externo (RAG por subprocess): ejecuta gate de la task 26 (--dry-run), luego pipeline.py; exit codes 0/1/2 (éxito/fallo/abort-por-coste) + resumen JSON",
+    "module": "scripts",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "media",
+    "depends_on": [
+      26,
+      27
+    ]
+  },
+  {
+    "id": 29,
+    "title": "Flujo C: spec de integración Drive real (jokes/historico/SPEC.md + nota en 00-overview.md) — fuente pasa de .docx local a carpeta Drive real, descarga a staging local, marcar_remates conserva firma local",
+    "module": "src/jokes/historico",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "alta",
+    "depends_on": [
+      17
+    ]
+  },
+  {
+    "id": 30,
+    "title": "Flujo C: historico/drive_source.py — lista carpeta Drive real y descarga .docx nuevos/modificados a staging, idempotencia por metadata Drive (fileId+modifiedTime/md5)",
+    "module": "src/jokes/historico",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "media",
+    "depends_on": [
+      29
+    ]
+  },
+  {
+    "id": 31,
+    "title": "Flujo C: .github/workflows/run_historico_semanal.yml — trigger schedule cron semanal, secrets de Supabase/Drive/LLM, ejecuta run_historico.py; documenta la decisión en 00-overview.md",
+    "module": "scripts",
+    "status": "done",
+    "priority": "medium",
+    "complejidad": "media",
+    "depends_on": [
+      28
+    ]
+  },
+  {
+    "id": 32,
+    "title": "Flujo B: spec del transporte webhook y la orquestación end-to-end (telegram/SPEC.md §Transporte + §Orquestación, P22 en 00-overview.md) — webhook vs polling, 200-antes-del-Silver con tramo LLM en background, secret_token, allowlist de chat_id evaluada antes de Bronze, ausencia de gate de coste batch (idempotencia+allowlist como controles primarios, rate-limit fuera de esta ronda)",
+    "module": "src/jokes/telegram",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "alta",
+    "depends_on": [
+      16
+    ]
+  },
+  {
+    "id": 33,
+    "title": "Contrato B/C: spec del routing IGUAL/CAMBIADO/NUEVO a Supabase como componente compartido (src/jokes/SPEC.md §Routing) — interfaz parametrizada por tipo_fuente, qué se extrae de historico/pipeline.py sin cambiar su comportamiento",
+    "module": "src/jokes",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "alta",
+    "depends_on": [
+      27,
+      32
+    ]
+  },
+  {
+    "id": 34,
+    "title": "Contrato B/C: src/jokes/routing.py — extrae _rutear_a_supabase de historico/pipeline.py a un módulo compartido; historico/pipeline.py delega sin cambio de comportamiento (tests de la task 27 en verde sin modificarse)",
+    "module": "src/jokes",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "media",
+    "depends_on": [
+      33
+    ]
+  },
+  {
+    "id": 35,
+    "title": "Flujo B: telegram/pipeline.py — orquestador importable (allowlist chat_id → Bronze → pre-limpieza → Silver → resolver_taxonomia → reconciliar_chiste → routing.py, tipo_fuente='propio'); marca procesado_at en Bronze al completar con éxito (mismo punto de marcado que usará el reproceso de la task 47)",
+    "module": "src/jokes/telegram",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "media",
+    "depends_on": [
+      32,
+      34,
+      16,
+      13,
+      14,
+      15,
+      25,
+      46
+    ]
+  },
+  {
+    "id": 36,
+    "title": "Flujo B: telegram/webhook_app.py — app FastAPI (POST /telegram/webhook con validación de X-Telegram-Bot-Api-Secret-Token, responde 200 tras Bronze, tramo Silver/reconciliación en BackgroundTasks, GET /health), tests con TestClient sin red",
+    "module": "src/jokes/telegram",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "media",
+    "depends_on": [
+      32,
+      35
+    ]
+  },
+  {
+    "id": 37,
+    "title": "Flujo B: scripts/set_telegram_webhook.py — registro one-shot re-ejecutable del webhook (setWebhook con secret_token y allowed_updates, getWebhookInfo de verificación, --delete), exit codes fiables + resumen JSON",
+    "module": "scripts",
+    "status": "done",
+    "priority": "medium",
+    "complejidad": "media",
+    "depends_on": [
+      32
+    ]
+  },
+  {
+    "id": 38,
+    "title": "Flujo B: deploy/Dockerfile + docker-compose.yml + .dockerignore — servicio webhook en contenedor (uvicorn, puerto interno, env_file, restart policy, healthcheck contra /health)",
+    "module": "deploy",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "media",
+    "depends_on": [
+      36
+    ]
+  },
+  {
+    "id": 39,
+    "title": "Flujo B: deploy/Caddyfile + servicio de proxy en docker-compose — reverse proxy con TLS automático (ACME) delante del contenedor webhook, expuesto en el puerto 8443 (443/80 ya ocupados por Coolify en el VPS, decisión explícita para no tocar lo que Coolify gestiona)",
+    "module": "deploy",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "media",
+    "depends_on": [
+      38
+    ]
+  },
+  {
+    "id": 40,
+    "title": "Flujo B: .github/workflows/deploy_telegram_webhook.yml — job de tests (pytest tests/unit/) como gate + deploy por SSH al VPS con docker compose up -d --build; documenta la decisión en 00-overview.md",
+    "module": "scripts",
+    "status": "pending",
+    "priority": "medium",
+    "complejidad": "media",
+    "depends_on": [
+      38,
+      39
+    ]
+  },
+  {
+    "id": 41,
+    "title": "Flujo B: deploy/README.md — runbook operativo (bootstrap del .env de producción en el VPS, primer arranque, registro del webhook contra el puerto 8443, rotación del secret, verificación con getWebhookInfo, dónde mirar logs)",
+    "module": "deploy",
+    "status": "pending",
+    "priority": "medium",
+    "complejidad": "baja",
+    "depends_on": [
+      37,
+      39,
+      40
+    ]
+  },
+  {
+    "id": 42,
+    "title": "Flujo A: spec del cierre de P18 — Drive real deja de estar diferido (src/theory/SPEC.md §DriveMonitor reescrita, src/utils/SPEC.md §DriveSync compartido, P23 en 00-overview.md); núcleo común extraído de historico/drive_source.py, MIMEs de teoría, y descarga a staging propio (data/staging/theory/, NO directo a data/raw/ — material sagrado, ver CLAUDE.md)",
+    "module": "src/theory",
+    "status": "pending",
+    "priority": "high",
+    "complejidad": "alta",
+    "depends_on": [
+      30,
+      2
+    ]
+  },
+  {
+    "id": 43,
+    "title": "Compartido: src/utils/drive_sync.py — núcleo de sync de carpeta Drive real (auth por cuenta de servicio, listado paginado, idempotencia por fileId+modifiedTime, staging local) parametrizado por MIMEs aceptados y política de export; historico/drive_source.py delega sin cambio de comportamiento",
+    "module": "src/utils",
+    "status": "pending",
+    "priority": "high",
+    "complejidad": "media",
+    "depends_on": [
+      42,
+      30
+    ]
+  },
+  {
+    "id": 44,
+    "title": "Flujo A: theory/drive_sync.py — especialización de teoría sobre src/utils/drive_sync.py (MIMEs pdf/docx/epub/txt + export de Google Docs nativos, DRIVE_FOLDER_ID, staging propio), tests sin red con cliente de Drive inyectado",
+    "module": "src/theory",
+    "status": "pending",
+    "priority": "high",
+    "complejidad": "media",
+    "depends_on": [
+      43
+    ]
+  },
+  {
+    "id": 45,
+    "title": "Flujo A: wiring del sync de Drive en theory/pipeline.py + scripts/run_pipeline.py (etapa 0 previa a DriveMonitor, activable por flag/inyección, modo solo-local intacto), sin tocar el resto de la cadena",
+    "module": "src/theory",
+    "status": "pending",
+    "priority": "high",
+    "complejidad": "media",
+    "depends_on": [
+      44,
+      22,
+      23
+    ]
+  },
+  {
+    "id": 46,
+    "title": "Flujo B: schema.sql añade procesado_at (nullable) a chistes_telegram_bronze + spec del mecanismo de recuperación post-200 (telegram/SPEC.md §Recuperación de fallos) — no toca texto_raw ni ninguna columna del mensaje original, solo bookkeeping de si ya completó el pipeline",
+    "module": "src/jokes/telegram",
+    "status": "done",
+    "priority": "high",
+    "complejidad": "baja",
+    "depends_on": [
+      32
+    ]
+  },
+  {
+    "id": 47,
+    "title": "Flujo B: scripts/reprocesar_bronze_pendiente.py — reprocesa mensajes de chistes_telegram_bronze con procesado_at NULL a través de telegram/pipeline.py (task 35), marca procesado_at al completar cada uno con éxito, exit codes fiables + resumen JSON",
+    "module": "scripts",
+    "status": "pending",
+    "priority": "medium",
+    "complejidad": "media",
+    "depends_on": [
+      35,
+      46
+    ]
+  }
 ]
