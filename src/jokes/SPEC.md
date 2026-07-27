@@ -177,6 +177,186 @@ devolviendo `list[dict]`** (la interfaz de `decidir_reconciliacion` no cambia),
 pero requeriría reordenar el flujo para tener el embedding entrante disponible
 en el fetch — fuera del alcance de hoy.
 
+## Routing (IGUAL/CAMBIADO/NUEVO a Supabase)
+
+> Componente compartido **`src/jokes/routing.py`**. Esta sección es su **spec**
+> (task 33); la **extracción** del código desde `historico/pipeline.py` es la
+> task 34 y el **segundo consumidor** (Flujo B) la task 35. Ninguna de las tres
+> cambia el comportamiento observable del Flujo C — ver §"Contrato de regresión".
+
+`reconciliacion.py` **decide, no persiste** (§Reconciliación): entrega un
+`ResultadoReconciliacion` con `decision` ∈ `IGUAL|CAMBIADO|NUEVO` y deja el
+INSERT/UPDATE al caller. Hoy ese caller es único —
+`historico/pipeline.py::_rutear_a_supabase` (etapa 5, task 27)— y lleva el
+`tipo_fuente` **hardcodeado** en una constante de módulo
+(`TIPO_FUENTE = "propio_historico"`). El Flujo B necesita exactamente las
+mismas tres ramas con `tipo_fuente='propio'`, así que la lógica se extrae a
+`src/jokes/routing.py` **parametrizada por `tipo_fuente`**, en vez de
+duplicarse en `telegram/pipeline.py`.
+
+### Alcance — `routing.py` es el paso 5b, no el 5a
+
+**El módulo compartido NO obtiene los candidatos ni llama a la
+reconciliación**: recibe el `ResultadoReconciliacion` **ya resuelto** y se
+limita a aplicarlo sobre Supabase. `listar_candidatos_reconciliacion` se queda
+**en cada caller**. Tres motivos, en orden de peso:
+
+1. **El `tipo_fuente` de lectura y el de escritura no son el mismo valor.** Al
+   escribir, un chiste de Telegram se inserta con `tipo_fuente='propio'`; al
+   leer candidatos, §"Obtención de candidatos" fija que un `propio` entrante
+   compara hoy contra `propio_historico`. Una función compartida con un único
+   parámetro `tipo_fuente` que hiciera las dos cosas cablearía a Flujo B a
+   comparar contra `propio` — contradiciendo esa sección. Separarlas mantiene
+   la política de alcance donde ya está especificada (y donde se cambiará si
+   cambia), y no la reparte en dos sitios.
+2. **`reconciliar_chiste` arrastra inyección LLM/embeddings.** Necesita
+   `generar_embedding_fn`, y calcula el embedding del entrante *después* del
+   fetch de candidatos (orden congelado, ver el trade-off P20 de arriba).
+   Meterlo en `routing.py` metería clientes de embeddings en un módulo que hoy
+   solo escribe filas, y arrastraría ese orden congelado a un tercer módulo.
+3. **Coherencia con `telegram/SPEC.md` §Orquestación** (task 32), que ya lista
+   el paso 9 (reconciliación, con candidatos de `listar_candidatos_reconciliacion`)
+   y el paso 10 (routing) como **filas distintas con componentes distintos**.
+
+| Entra en `routing.py` | Se queda en cada caller |
+|---|---|
+| Las 3 ramas IGUAL/CAMBIADO/NUEVO | `store.listar_candidatos_reconciliacion(...)` (5a) |
+| `crear_chiste` / `crear_revision` / `obtener_chiste` / `actualizar_chiste` | `reconciliar_chiste(...)` (5a) |
+| El empaquetado de `estructura_detectada` (`_estructura_revision`) | Silver, taxonomías y todo lo aguas arriba |
+| El valor de `tipo_fuente` **de escritura**, como parámetro | La constante concreta (`propio_historico` / `propio`) |
+
+### Interfaz pública
+
+```python
+# src/jokes/routing.py
+
+@dataclass(frozen=True)
+class ResultadoRuteo:
+    decision: str                 # IGUAL | CAMBIADO | NUEVO
+    chiste_id: Optional[str]
+    tema_id: Optional[int]
+    tecnica_id: Optional[int]
+
+
+def rutear_chiste(
+    store: Any,
+    estructurado: ChisteEstructurado,
+    recon: ResultadoReconciliacion,
+    *,
+    tipo_fuente: str,
+    tema_id: Optional[int] = None,
+    tecnica_id: Optional[int] = None,
+) -> ResultadoRuteo
+```
+
+| Parámetro | Origen | Uso |
+|---|---|---|
+| `store` | `SupabaseStore` (o doble en tests) | `crear_chiste`, `crear_revision`, `obtener_chiste`, `actualizar_chiste` |
+| `estructurado` | `silver.ChisteEstructurado` | `chiste_normalizado`, `estado`, `sugerencias_mejora`, `estructura_detectada` |
+| `recon` | `reconciliacion.ResultadoReconciliacion` | `decision`, `chiste_id`, `hash_normalizado`, `embedding` |
+| `tipo_fuente` | **constante del flujo**, nunca del LLM | solo la rama NUEVO (`crear_chiste`); sustituye a la constante de módulo de Flujo C |
+| `tema_id` / `tecnica_id` | `resolver_taxonomia` (§Taxonomías) | `None` = sin match (candidato encolado) → ver regla de no-sobrescritura |
+
+Los parámetros de después de `store/estructurado/recon` son **keyword-only**:
+`tema_id` y `tecnica_id` son dos `Optional[int]` contiguos e intercambiables por
+posición, y un swap silencioso escribiría taxonomías cruzadas sin fallar.
+
+**Validación de `tipo_fuente`:** `routing.py` **no** revalida contra
+`TIPOS_FUENTE_CHISTE`. El gatekeeper único sigue siendo `supabase_store.py`
+(`_build_chiste_payload` → `_validar_tipo_fuente_chiste`, `ValueError`), misma
+regla de "una sola copia del enum" que §"Obtención de candidatos". Consecuencia
+aceptada y explícita: un `tipo_fuente` inválido **solo** falla en la rama NUEVO
+(las otras dos no lo usan). Es tolerable porque el valor es una constante de
+código por flujo, nunca entrada de usuario.
+
+### `inicio_localizado` NO viaja al módulo compartido
+
+`ChisteRuteado.inicio_localizado` (Flujo C) es una bandera del **Segmentador**
+de histórico (fallback conservador cuando el LLM alucinó dónde empieza el
+setup, ver `historico/segmentador.py`), que se propaga hasta el resumen del run
+para la revisión humana muestral. Telegram **no tiene Segmentador** — un
+mensaje ya es la unidad —, así que el campo no significaría nada allí.
+
+Decisión: **queda fuera de `ResultadoRuteo`**, en vez de generalizarse a un
+`Optional[bool] = None`. El motivo decisivo es que `_rutear_a_supabase` **nunca
+lo lee**: no participa en ninguna de las tres ramas, solo se copia a la salida.
+Un parámetro que la función no usa, con un nombre que solo tiene sentido en uno
+de los dos consumidores, es lastre en un contrato compartido; y un campo que en
+Flujo B sería `None` para siempre invita a que alguien lo interprete como
+"inicio no localizado" en vez de "no aplica".
+
+**Flujo C lo conserva sin cambio observable**, añadiéndolo *después* de la
+llamada. `historico/pipeline.py` mantiene su `ChisteRuteado` como **subclase**
+del resultado compartido:
+
+```python
+# src/jokes/historico/pipeline.py (task 34)
+@dataclass(frozen=True)
+class ChisteRuteado(ResultadoRuteo):
+    inicio_localizado: bool
+```
+
+Así los 4 campos genéricos no pueden derivar y el 5º sigue siendo de Flujo C.
+La **restricción dura** que la task 34 debe respetar, sea cual sea el idioma de
+implementación elegido: `ChisteRuteado` sigue siendo **importable desde
+`src.jokes.historico.pipeline`**, con los **mismos 5 campos, mismo orden, mismo
+tipo y mismo significado** (`decision`, `chiste_id`, `tema_id`, `tecnica_id`,
+`inicio_localizado`) — construible tanto por keyword como por posición, y con
+`inicio_localizado` **`bool` de verdad** (los tests afirman `is False`, no
+`== False`). Si la herencia diera fricción, una dataclass independiente de 5
+campos poblada desde el `ResultadoRuteo` devuelto es igual de válida.
+
+### Las tres ramas (comportamiento idéntico al actual)
+
+| Decisión | Escrituras | Detalle |
+|---|---|---|
+| **IGUAL** | ninguna | Dedup (§Reconciliación). Devuelve `chiste_id=recon.chiste_id` tal cual, incluso si es `None`. **No** toca Supabase: es lo que hace idempotente el reproceso. |
+| **NUEVO** | `crear_chiste` + `crear_revision` | `crear_chiste(texto_normalizado, hash_normalizado, tipo_fuente, embedding, tema_id, tecnica_id, estado, version_actual=1)`; después `crear_revision(chiste_id=fila["id"], version=1, contenido, estructura_detectada, estado, sugerencias_mejora)`. `chiste_id` de salida = el `id` recién creado. |
+| **CAMBIADO** | `crear_revision` + `actualizar_chiste` | Lee `obtener_chiste(recon.chiste_id)`, calcula `nueva_version = (version_actual or 1) + 1`, crea la revisión (append-only, §Versionado) y actualiza el chiste con `texto_normalizado`, `hash_normalizado`, `embedding`, `estado` y `version_actual`. |
+
+**Regla de no-sobrescritura de taxonomías (solo CAMBIADO):** `tema_id` y
+`tecnica_id` se añaden al `UPDATE` **únicamente si no son `None`**. Nunca se
+pisa un ID ya existente en la fila con un `None` producido porque la resolución
+encoló un candidato para revisión humana (§Taxonomías). En NUEVO sí se pasan
+siempre (la fila no existía: `None` es la ausencia legítima).
+
+**`estructura_detectada`:** Silver produce un string libre y
+`chistes_revisiones.estructura_detectada` es `jsonb` (§Storage). El helper que
+hoy vive en `historico/pipeline.py` (`_estructura_revision`) **se mueve con la
+función** —es privado y solo lo usan las ramas NUEVO/CAMBIADO— y sigue
+produciendo exactamente `{"descripcion": <estructura_detectada de Silver>,
+"tecnica_id": <id resuelto o None>}`.
+
+### Contrato de regresión (task 34 no puede romperlo)
+
+La extracción es **mecánica**: mismo cuerpo, mismas llamadas al `store`, mismo
+orden de escrituras. Lo único que cambia es de dónde sale el `tipo_fuente`
+(parámetro en vez de constante de módulo) y dónde se pega `inicio_localizado`.
+
+| Se extrae literalmente | Cambia |
+|---|---|
+| Cuerpo de `_rutear_a_supabase` (3 ramas) | `TIPO_FUENTE` → parámetro `tipo_fuente` |
+| `_estructura_revision` | `inicio_localizado` sale de la firma y del resultado compartido |
+| Orden y argumentos de las llamadas al `store` | `historico/pipeline.py` delega en vez de implementar |
+
+`historico/pipeline.py` conserva su constante `TIPO_FUENTE = "propio_historico"`
+(la sigue necesitando en la etapa 5a para `listar_candidatos_reconciliacion`) y
+se la pasa a `rutear_chiste`. Los tests de la task 27
+(`tests/unit/jokes/historico/test_pipeline.py`) son el **contrato de regresión**:
+deben seguir en verde **sin modificarse** — incluidos los que afirman
+`tipo_fuente == "propio_historico"` en la fila creada, el `assert` del doble de
+store sobre el `tipo_fuente` de los candidatos, la versión `N+1` en CAMBIADO, la
+ausencia de `tema_id`/`tecnica_id` en el `UPDATE` sin match y
+`inicio_localizado is False`. Igual para `scripts/run_historico.py` (task 28),
+que serializa los 5 campos de `ChisteRuteado` en su resumen JSON.
+
+### Consumidores
+
+| Consumidor | Task | `tipo_fuente` | Nota |
+|---|---|---|---|
+| `src/jokes/historico/pipeline.py` (etapa 5b) | 34 | `propio_historico` | Delega; comportamiento observable intacto |
+| `src/jokes/telegram/pipeline.py` (paso 10 del tramo background) | 35 | `propio` | Consumidor nuevo; ver `telegram/SPEC.md` §Orquestación |
+
 ## Limpieza, idioma y metadatos (chistes)
 
 **Limpieza:** Bronze raw + pre-limpieza mínima + normalización por LLM que
