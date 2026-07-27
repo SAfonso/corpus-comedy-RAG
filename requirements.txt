@@ -24,7 +24,12 @@ APScheduler
 supabase                 # Cliente supabase-py (API REST/PostgREST), task 12: supabase_store.py
 google-genai              # Cliente oficial de Gemini (LLM barato, §Silver), task 13: src/utils/llm/client.py
 
+# Flujo B — transporte webhook (src/jokes/telegram/webhook_app.py, task 36)
+fastapi                  # App ASGI del endpoint /telegram/webhook + /health
+uvicorn                  # Server ASGI que sirve la app (consumido por el contenedor de la task 38)
+
 # Testing
 pytest
 pytest-cov
 PyYAML                   # parseo del workflow de GH Actions en tests (task 31, test_run_historico_workflow.py)
+httpx                    # requerido por TestClient de FastAPI/Starlette (tests sin red, task 36)
