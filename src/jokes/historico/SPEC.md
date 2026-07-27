@@ -112,9 +112,14 @@ evita reprocesar lo idéntico.
 
 ## Fuente de entrada — carpeta Drive real (P19, 2026-07-24)
 
-A diferencia del Flujo A, cuya integración con Drive real está **diferida** y
-apunta a carpetas locales (P18, ver `src/theory/SPEC.md` §DriveMonitor), el
-Flujo C **sí lee de una carpeta de Google Drive real**. El motivo es
+Cuando se escribió P19, el Flujo A tenía su integración con Drive real
+**diferida** sobre carpetas locales (P18) y el Flujo C fue el primero en leer
+de una **carpeta de Google Drive real**. Desde **P23** (2026-07-27) el Flujo A
+también lee de Drive real y **reutiliza este mismo mecanismo** a través del
+núcleo compartido `src/utils/drive_sync.py` (ver `src/utils/SPEC.md` §DriveSync
+y `src/theory/SPEC.md` §Fuente de entrada): `drive_source.py` pasa a **delegar**
+en él sin cambio de comportamiento (task 43) — el contrato de abajo sigue
+siendo el de este flujo, palabra por palabra. El motivo original era
 operativo: el histórico es material propio que sigue creciendo en Drive, y su
 ejecución se disparará **semanalmente y desatendida** vía GitHub Actions
 (task 31) — no hay nadie que copie `.docx` a mano a una carpeta local antes de
