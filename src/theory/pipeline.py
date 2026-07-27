@@ -6,9 +6,35 @@ testeados de Flujo A, cada uno con su propia responsabilidad y sus propios
 tests unitarios — este módulo NO reimplementa ninguna etapa, solo las
 conecta:
 
-    DriveMonitor -> Parser -> SubtypeDetector -> Cleaner -> LanguageDetector
+    [DriveSync (etapa 0, opcional)] -> DriveMonitor -> Parser
+      -> SubtypeDetector -> Cleaner -> LanguageDetector
       -> LanguageNormalizer -> QualityScorer -> FormatNormalizer
       -> /data/processed/v{N}/
+
+## Etapa 0 opcional: `drive_sync` (task 45, P23)
+
+Ver `src/theory/SPEC.md` §"Fuente de entrada — Drive real y modo dual (P23)"
+para el contrato completo (ya fijado, no se rediseña aquí). Resumen: `run_pipeline`
+recibe un parámetro `drive_sync` inyectable (duck-typed: `.sync() -> list[Path]`
++ atributo `.staging_dir: Path` — p.ej. `src.theory.drive_sync.DriveSyncTeoria`,
+pero tipado aquí como `Any` deliberadamente para no forzar el import de
+`src.theory.drive_sync`, ni de sus dependencias de `google-api-python-client`,
+en callers/tests que solo usan el modo solo-local).
+
+- `drive_sync=None` (por defecto): modo solo-local, comportamiento **bit a
+  bit idéntico** al de antes de esta tarea — no se toca nada de Drive.
+- `drive_sync` presente: se ejecuta `drive_sync.sync()` como etapa 0, ANTES
+  de resolver `carpetas` y de instanciar ningún `DriveMonitor` (tiene que
+  completarse y poblar `staging_dir` antes de que `DriveMonitor` la escanee).
+  Este módulo NO reimplementa nada de `DriveSync`/`DriveSyncTeoria` (auth,
+  idempotencia por `fileId`+`modifiedTime`, etc.) — solo llama a `.sync()`
+  una vez.
+- Resolución de `carpetas` (los 3 casos exactos de la tabla de la SPEC):
+  `drive_sync=None` + `carpetas=None` -> defaults locales de siempre;
+  `drive_sync` presente + `carpetas=None` -> `[drive_sync.staging_dir]` (el
+  default local NO se añade); `carpetas` explícito -> se respeta tal cual, y
+  si `drive_sync` está presente y su `staging_dir` no está ya en la lista, se
+  añade. El resto de la cadena (`DriveMonitor` en adelante) no cambia.
 
 `QualityScorer` (`src/utils/quality_scorer.score_quality`) no se invoca aquí
 como paso explícito: `format_normalizer.generar_version` YA lo invoca
@@ -104,7 +130,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from src.theory.cleaners.transcript_cleaner import clean_fragments
 from src.theory.detectors.subtype_detector import detect_subtypes
@@ -238,12 +264,14 @@ def run_pipeline(
     ruta_estado: Optional[Path] = None,
     traductor: Optional[Traductor] = None,
     version: Optional[int] = None,
+    drive_sync: Optional[Any] = None,
 ) -> ResultadoPipeline:
     """Ejecuta un run completo del Flujo A sobre los ficheros nuevos/modificados.
 
     - `carpetas`: carpetas vigiladas (por defecto `data/raw/books/` y
       `data/raw/notes/`, ver `src/theory/SPEC.md` §DriveMonitor). Carpetas
-      que no existan se ignoran sin error (nada que vigilar en ellas).
+      que no existan se ignoran sin error (nada que vigilar en ellas). Ver
+      `drive_sync` abajo para cómo cambia esta resolución en modo Drive-real.
     - `directorio_procesado`: destino de `v{N}/` (por defecto `data/processed/`).
     - `ruta_estado`: `processed_files.json` de idempotencia (por defecto
       `data/state/processed_files.json`).
@@ -252,17 +280,34 @@ def run_pipeline(
       un traductor sin red.
     - `version`: se pasa tal cual a `generar_version` (por defecto, la
       siguiente versión libre).
+    - `drive_sync`: etapa 0 opcional (task 45, P23, ver docstring del módulo
+      §"Etapa 0 opcional"). `None` (por defecto) -> modo solo-local, ni una
+      línea de comportamiento distinta de antes de esta tarea. Un objeto con
+      `.sync() -> list[Path]` + `.staging_dir: Path` (p.ej.
+      `src.theory.drive_sync.DriveSyncTeoria`) -> se invoca `.sync()` una
+      única vez ANTES de resolver `carpetas`/instanciar `DriveMonitor`, y
+      `carpetas` se resuelve según la tabla de la SPEC (ver módulo).
 
     Marca cada fichero en `ruta_estado` SOLO tras completar con éxito toda
     la cadena hasta `generar_version` (ver docstring del módulo, §Fricción
     resuelta: DriveMonitor). Si no hay ningún fichero pendiente, no genera
     ninguna versión nueva (`version_dir=None`, listas vacías).
     """
-    carpetas = (
-        list(carpetas)
-        if carpetas is not None
-        else [CARPETA_BOOKS_POR_DEFECTO, CARPETA_NOTES_POR_DEFECTO]
-    )
+    if drive_sync is not None:
+        # Etapa 0: sincroniza Drive -> staging ANTES de que DriveMonitor
+        # escanee nada (si no, no habría nada que escanear todavía). Este
+        # módulo no reimplementa DriveSync/DriveSyncTeoria: solo la llama.
+        drive_sync.sync()
+
+    if carpetas is not None:
+        carpetas = list(carpetas)
+        if drive_sync is not None and drive_sync.staging_dir not in carpetas:
+            carpetas.append(drive_sync.staging_dir)
+    elif drive_sync is not None:
+        carpetas = [drive_sync.staging_dir]
+    else:
+        carpetas = [CARPETA_BOOKS_POR_DEFECTO, CARPETA_NOTES_POR_DEFECTO]
+
     directorio_procesado = Path(directorio_procesado) if directorio_procesado is not None else DIRECTORIO_PROCESADO_POR_DEFECTO
     ruta_estado = Path(ruta_estado) if ruta_estado is not None else RUTA_ESTADO_POR_DEFECTO
 

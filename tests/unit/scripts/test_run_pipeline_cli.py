@@ -42,13 +42,22 @@ class _RunPipelineEspia:
         self.excepcion = excepcion
         self.llamadas = []
 
-    def __call__(self, carpetas, *, directorio_procesado=None, ruta_estado=None, version=None):
+    def __call__(
+        self,
+        carpetas,
+        *,
+        directorio_procesado=None,
+        ruta_estado=None,
+        version=None,
+        drive_sync=None,
+    ):
         self.llamadas.append(
             {
                 "carpetas": carpetas,
                 "directorio_procesado": directorio_procesado,
                 "ruta_estado": ruta_estado,
                 "version": version,
+                "drive_sync": drive_sync,
             }
         )
         if self.excepcion is not None:
@@ -79,6 +88,30 @@ def _crear_store_espia(registro):
         return _StoreFake()
 
     return _crear
+
+
+class _DriveSyncInstanciaFake:
+    """Objeto devuelto por `crear_drive_sync_fn` en los tests — no necesita
+    comportamiento propio, solo ser un objeto identificable (`is`) para
+    verificar que `main()` lo reenvía tal cual a `run_pipeline_fn`."""
+
+
+class _CrearDriveSyncEspia:
+    """Doble de `desde_entorno` (o de cualquier `crear_drive_sync_fn`
+    inyectado): registra con qué `staging_dir`/`state_path` se le llamó y
+    devuelve una instancia fija, o lanza `excepcion` (simula el `RuntimeError`
+    de `desde_entorno` cuando falta `DRIVE_FOLDER_ID`)."""
+
+    def __init__(self, resultado=None, excepcion=None):
+        self.resultado = resultado if resultado is not None else _DriveSyncInstanciaFake()
+        self.excepcion = excepcion
+        self.llamadas = []
+
+    def __call__(self, *, staging_dir=None, state_path=None):
+        self.llamadas.append({"staging_dir": staging_dir, "state_path": state_path})
+        if self.excepcion is not None:
+            raise self.excepcion
+        return self.resultado
 
 
 # ---------------------------------------------------------------------------
@@ -350,3 +383,92 @@ def test_ingest_llama_a_ingestar_version_con_directorio_base_y_version_correctos
         "num_nuevos": 5,
         "num_duplicados": 0,
     }
+
+
+# ---------------------------------------------------------------------------
+# main() — --sync-drive (task 45, wiring de Drive real, P23)
+#
+# Contrato: `--sync-drive` es `store_true`, off por defecto (modo solo-local
+# intacto: `crear_drive_sync_fn` nunca se llama). Con la flag, construye el
+# sync vía `crear_drive_sync_fn(staging_dir=..., state_path=...)` (inyectable,
+# por defecto `src.theory.drive_sync.desde_entorno`) y lo pasa a
+# `run_pipeline_fn(..., drive_sync=<instancia>)`. Un fallo de construcción
+# (p.ej. `RuntimeError` por falta de `DRIVE_FOLDER_ID`) reutiliza el exit code
+# 3 ya existente de "fallo fatal inesperado" — no se inventa uno nuevo.
+# ---------------------------------------------------------------------------
+
+
+def test_sync_drive_ausente_no_llama_a_crear_drive_sync_fn(capsys):
+    run_espia = _RunPipelineEspia(resultado=ResultadoPipeline())
+    drive_espia = _CrearDriveSyncEspia()
+
+    codigo = main([], run_pipeline_fn=run_espia, crear_drive_sync_fn=drive_espia)
+
+    assert codigo == 0
+    assert drive_espia.llamadas == []
+    assert len(run_espia.llamadas) == 1
+    assert run_espia.llamadas[0]["drive_sync"] is None
+
+
+def test_sync_drive_presente_llama_a_crear_drive_sync_fn_y_lo_reenvia_a_run_pipeline(
+    tmp_path, capsys
+):
+    run_espia = _RunPipelineEspia(resultado=ResultadoPipeline())
+    instancia = _DriveSyncInstanciaFake()
+    drive_espia = _CrearDriveSyncEspia(resultado=instancia)
+
+    codigo = main(
+        [
+            "--sync-drive",
+            "--drive-staging-dir",
+            str(tmp_path / "staging"),
+            "--drive-state-path",
+            str(tmp_path / "state.json"),
+        ],
+        run_pipeline_fn=run_espia,
+        crear_drive_sync_fn=drive_espia,
+    )
+
+    assert codigo == 0
+    assert len(drive_espia.llamadas) == 1
+    llamada = drive_espia.llamadas[0]
+    assert llamada["staging_dir"] == tmp_path / "staging"
+    assert llamada["state_path"] == tmp_path / "state.json"
+
+    assert len(run_espia.llamadas) == 1
+    assert run_espia.llamadas[0]["drive_sync"] is instancia
+
+
+def test_sync_drive_sin_rutas_explicitas_pasa_none_para_usar_los_defaults(capsys):
+    run_espia = _RunPipelineEspia(resultado=ResultadoPipeline())
+    drive_espia = _CrearDriveSyncEspia()
+
+    codigo = main(
+        ["--sync-drive"], run_pipeline_fn=run_espia, crear_drive_sync_fn=drive_espia
+    )
+
+    assert codigo == 0
+    llamada = drive_espia.llamadas[0]
+    assert llamada["staging_dir"] is None
+    assert llamada["state_path"] is None
+
+
+def test_sync_drive_fallo_de_configuracion_devuelve_exit_code_3(capsys):
+    run_espia = _RunPipelineEspia(resultado=ResultadoPipeline())
+    drive_espia = _CrearDriveSyncEspia(
+        excepcion=RuntimeError(
+            "theory.drive_sync.desde_entorno sin folder_id: pásalo o define DRIVE_FOLDER_ID."
+        )
+    )
+
+    codigo = main(
+        ["--sync-drive"], run_pipeline_fn=run_espia, crear_drive_sync_fn=drive_espia
+    )
+    salida = capsys.readouterr()
+
+    assert codigo == 3
+    # El fallo ocurre construyendo el drive_sync, ANTES de invocar run_pipeline_fn.
+    assert run_espia.llamadas == []
+    resumen = json.loads(salida.out)
+    assert "DRIVE_FOLDER_ID" in resumen["error_fatal"]
+    assert "DRIVE_FOLDER_ID" in salida.err

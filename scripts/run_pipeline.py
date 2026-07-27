@@ -56,7 +56,26 @@ Esquema del resumen (siempre las mismas claves, ver `construir_resumen`):
 - `3`: el propio `run_pipeline` lanzó una excepción inesperada (fuera de su
   contrato normal, que ya captura los fallos por fichero en `fallidos` — ver
   `pipeline.py`). Red de seguridad para no propagar un traceback críptico a
-  un consumidor externo sin exit code fiable.
+  un consumidor externo sin exit code fiable. **Incluye el fallo de
+  configuración de `--sync-drive`** (p.ej. `RuntimeError` de
+  `desde_entorno()` por falta de `DRIVE_FOLDER_ID`, ver §`--sync-drive`
+  abajo) — no es un caso nuevo, es exactamente "fallo fatal inesperado antes
+  de completar el run", así que reutiliza el mismo exit code, no uno nuevo.
+
+## `--sync-drive` (task 45, P23) — etapa 0 opcional de Drive real
+
+Por defecto (`--sync-drive` ausente) este script es wiring puro sobre el
+modo solo-local de `run_pipeline` — no importa credenciales de Drive ni toca
+red, comportamiento idéntico al de antes de esta tarea. Con `--sync-drive`,
+construye un `DriveSyncTeoria` vía `crear_drive_sync_fn` (inyectable, por
+defecto `src.theory.drive_sync.desde_entorno`) usando `--drive-staging-dir`/
+`--drive-state-path` (o `None` -> defaults de `src.theory.drive_sync`), y lo
+pasa a `run_pipeline_fn(..., drive_sync=<instancia>)` para que la etapa 0
+corra antes de `DriveMonitor` (ver `src/theory/pipeline.py`). La construcción
+ocurre DENTRO del mismo `try` que ya envuelve la llamada a `run_pipeline_fn`
+— un fallo ahí (típicamente `DRIVE_FOLDER_ID` sin definir) se trata igual que
+cualquier fallo fatal de `run_pipeline`: exit code `3`, mismo resumen JSON de
+error (ver arriba).
 
 ## `--ingest` cuando no había nada pendiente
 
@@ -85,7 +104,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 # Bootstrap de sys.path: permite invocar `python scripts/run_pipeline.py` (o
 # vía subprocess con cualquier cwd) sin depender de PYTHONPATH ni de que el
@@ -97,6 +116,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from src.theory.drive_sync import desde_entorno  # noqa: E402
 from src.theory.ingest_teoria import ResultadoIngesta, ingestar_version  # noqa: E402
 from src.theory.pipeline import ResultadoPipeline, run_pipeline  # noqa: E402
 
@@ -170,7 +190,8 @@ def _construir_parser() -> argparse.ArgumentParser:
             "indica; los logs de progreso van siempre a stderr. Exit codes: 0 "
             "= exito (incluye 'nada pendiente', que no es un fallo), 1 = algun "
             "fichero en 'fallidos', 2 = --ingest fallo (pipeline sin fallidos), "
-            "3 = fallo fatal inesperado de run_pipeline."
+            "3 = fallo fatal inesperado de run_pipeline (incluye fallo de "
+            "configuracion de --sync-drive, p.ej. falta DRIVE_FOLDER_ID)."
         ),
     )
     parser.add_argument(
@@ -219,6 +240,37 @@ def _construir_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--sync-drive",
+        action="store_true",
+        help=(
+            "Activa el modo Drive-real: ejecuta DriveSyncTeoria.sync() como "
+            "etapa 0 antes de DriveMonitor (ver src/theory/SPEC.md #Fuente de "
+            "entrada, P23). Por defecto NO se activa (modo solo-local "
+            "intacto: no se importa credenciales de Drive ni se toca red)."
+        ),
+    )
+    parser.add_argument(
+        "--drive-staging-dir",
+        dest="drive_staging_dir",
+        type=Path,
+        default=None,
+        help=(
+            "Staging local del sync de Drive (solo con --sync-drive; por "
+            "defecto STAGING_DIR_POR_DEFECTO de src.theory.drive_sync)."
+        ),
+    )
+    parser.add_argument(
+        "--drive-state-path",
+        dest="drive_state_path",
+        type=Path,
+        default=None,
+        help=(
+            "Fichero de estado de idempotencia del sync de Drive (solo con "
+            "--sync-drive; por defecto RUTA_ESTADO_DRIVE_POR_DEFECTO de "
+            "src.theory.drive_sync)."
+        ),
+    )
+    parser.add_argument(
         "--summary-out",
         dest="summary_out",
         type=Path,
@@ -238,20 +290,33 @@ def main(
     run_pipeline_fn: Callable[..., ResultadoPipeline] = run_pipeline,
     ingestar_version_fn: Callable[..., ResultadoIngesta] = ingestar_version,
     crear_store_fn: Callable[[], object] = _crear_store_por_defecto,
+    crear_drive_sync_fn: Callable[..., Any] = desde_entorno,
 ) -> int:
-    """Entrada del CLI. `run_pipeline_fn`/`ingestar_version_fn`/`crear_store_fn`
-    son inyectables (ver `tests/unit/scripts/test_run_pipeline_cli.py`); en
-    producción son los componentes reales de Flujo A."""
+    """Entrada del CLI. `run_pipeline_fn`/`ingestar_version_fn`/`crear_store_fn`/
+    `crear_drive_sync_fn` son inyectables (ver
+    `tests/unit/scripts/test_run_pipeline_cli.py`); en producción son los
+    componentes reales de Flujo A. `crear_drive_sync_fn` solo se invoca si
+    `--sync-drive` está presente (ver docstring del módulo, §--sync-drive)."""
     parser = _construir_parser()
     args = parser.parse_args(argv)
 
     try:
-        resultado = run_pipeline_fn(
-            args.carpetas,
-            directorio_procesado=args.directorio_procesado,
-            ruta_estado=args.ruta_estado,
-            version=args.version,
-        )
+        drive_sync_instance: Optional[Any] = None
+        if args.sync_drive:
+            drive_sync_instance = crear_drive_sync_fn(
+                staging_dir=args.drive_staging_dir,
+                state_path=args.drive_state_path,
+            )
+
+        kwargs_run_pipeline: dict = {
+            "directorio_procesado": args.directorio_procesado,
+            "ruta_estado": args.ruta_estado,
+            "version": args.version,
+        }
+        if drive_sync_instance is not None:
+            kwargs_run_pipeline["drive_sync"] = drive_sync_instance
+
+        resultado = run_pipeline_fn(args.carpetas, **kwargs_run_pipeline)
     except Exception as exc:  # noqa: BLE001 — red de seguridad, ver §Semántica de exit codes
         print(f"run_pipeline: fallo fatal antes de completar el run: {exc}", file=sys.stderr)
         resumen = construir_resumen(ResultadoPipeline(), None)
