@@ -109,6 +109,7 @@ from typing import Any, Callable, Optional
 from scripts.marcar_remates import procesar_docx
 from src.jokes.historico.loader import Loader
 from src.jokes.reconciliacion import ResultadoReconciliacion, reconciliar_chiste
+from src.jokes.routing import ResultadoRuteo, rutear_chiste
 from src.jokes.silver import ChisteEstructurado, estructurar_chiste
 from src.jokes.historico.segmentador import ChisteSegmentado, segmentar_documento
 from src.jokes.taxonomias import ResultadoTaxonomia, resolver_taxonomia
@@ -131,25 +132,20 @@ ENV_FOLDER_ID = "DRIVE_FOLDER_ID_HISTORICO"
 
 
 @dataclass(frozen=True)
-class ChisteRuteado:
+class ChisteRuteado(ResultadoRuteo):
     """Resultado de rutear UN chiste a Supabase (etapa 5).
 
-    - `decision`: `IGUAL` (dedup, no escribe) | `CAMBIADO` (nueva revisión del
-      chiste existente) | `NUEVO` (inserta chiste nuevo).
-    - `chiste_id`: id del chiste afectado (el existente en IGUAL/CAMBIADO, el
-      recién creado en NUEVO). `None` solo si la decisión IGUAL vino de un
-      candidato sin `id` (no debería ocurrir con datos reales).
-    - `tema_id`/`tecnica_id`: IDs resueltos por `resolver_taxonomia` (loop
-      P16), o `None` si se encoló un candidato para revisión humana (sin match).
-    - `inicio_localizado`: bandera del Segmentador (fallback conservador si el
-      LLM alució el arranque del setup, ver `segmentador.py`) — se propaga para
-      la revisión humana muestral.
+    Subclase de `src.jokes.routing.ResultadoRuteo` (§"routing.py" en
+    `src/jokes/SPEC.md`, task 34) — los 4 campos genéricos (`decision`,
+    `chiste_id`, `tema_id`, `tecnica_id`) viven en la clase base y no pueden
+    derivar entre Flujo B y C; `inicio_localizado` es exclusivo de Histórico
+    (bandera del Segmentador — fallback conservador si el LLM alucinó el
+    arranque del setup, ver `segmentador.py`) y se propaga para la revisión
+    humana muestral. Telegram no tiene Segmentador, así que este 5º campo no
+    viaja al módulo compartido (ver §"inicio_localizado NO viaja al módulo
+    compartido").
     """
 
-    decision: str
-    chiste_id: Optional[str]
-    tema_id: Optional[int]
-    tecnica_id: Optional[int]
     inicio_localizado: bool
 
 
@@ -242,21 +238,13 @@ def _guardar_estado(ruta_estado: Path, estado: dict) -> None:
 # Etapa 5 — routing de UN chiste a Supabase según la decisión de reconciliación.
 # `reconciliacion.py` "decide, no persiste" (su docstring): el INSERT/UPDATE es
 # responsabilidad de este orquestador (caller), vía `supabase_store.py`.
+#
+# El cuerpo (3 ramas + `_estructura_revision`) vive ahora en el módulo
+# compartido `src/jokes/routing.py` (task 34, `rutear_chiste`) — este helper
+# solo delega y reañade `inicio_localizado`, que no viaja al contrato
+# compartido (ver `src/jokes/SPEC.md` §"inicio_localizado NO viaja al módulo
+# compartido").
 # ---------------------------------------------------------------------------
-
-def _estructura_revision(estructurado: ChisteEstructurado, tecnica_id: Optional[int]) -> dict:
-    """`estructura_detectada` (jsonb de `chistes_revisiones`, §Storage) a partir
-    de la salida de Silver (string libre) + el `tecnica_id` ya resuelto.
-
-    `_build_revision_payload` espera un `dict` para esa columna; Silver produce
-    un string (`estructura_detectada`). Se empaqueta junto al `tecnica_id`
-    resuelto para no perder ni la descripción libre del LLM ni el ID mapeado.
-    """
-    return {
-        "descripcion": estructurado.estructura_detectada,
-        "tecnica_id": tecnica_id,
-    }
-
 
 def _rutear_a_supabase(
     store: Any,
@@ -268,84 +256,20 @@ def _rutear_a_supabase(
 ) -> ChisteRuteado:
     """Aplica la decisión IGUAL/CAMBIADO/NUEVO sobre Supabase (etapa 5).
 
-    - IGUAL: dedup — no escribe nada (idempotencia, §Reconciliación).
-    - NUEVO: `crear_chiste` (`version_actual=1`) + `crear_revision` (v1).
-    - CAMBIADO: `crear_revision` (siguiente versión, append-only) +
-      `actualizar_chiste` (apunta `version_actual` a la nueva y refresca
-      texto/hash/embedding/estado). Las taxonomías (`tema_id`/`tecnica_id`)
-      solo se escriben si hubo match — nunca se sobrescribe un ID existente
-      con `None` cuando la resolución encoló un candidato para revisión humana.
+    Delega en `routing.rutear_chiste` (comportamiento idéntico, ver su
+    docstring) con `tipo_fuente=TIPO_FUENTE` ("propio_historico") y envuelve
+    el `ResultadoRuteo` devuelto en `ChisteRuteado`, añadiendo
+    `inicio_localizado` (exclusivo de Histórico).
     """
-    if recon.decision == "IGUAL":
-        return ChisteRuteado(
-            decision="IGUAL",
-            chiste_id=recon.chiste_id,
-            tema_id=tema_id,
-            tecnica_id=tecnica_id,
-            inicio_localizado=inicio_localizado,
-        )
-
-    if recon.decision == "NUEVO":
-        fila = store.crear_chiste(
-            texto_normalizado=estructurado.chiste_normalizado,
-            hash_normalizado=recon.hash_normalizado,
-            tipo_fuente=TIPO_FUENTE,
-            embedding=recon.embedding,
-            tema_id=tema_id,
-            tecnica_id=tecnica_id,
-            estado=estructurado.estado,
-            version_actual=1,
-        )
-        store.crear_revision(
-            chiste_id=fila["id"],
-            version=1,
-            contenido=estructurado.chiste_normalizado,
-            estructura_detectada=_estructura_revision(estructurado, tecnica_id),
-            estado=estructurado.estado,
-            sugerencias_mejora=estructurado.sugerencias_mejora,
-        )
-        return ChisteRuteado(
-            decision="NUEVO",
-            chiste_id=fila["id"],
-            tema_id=tema_id,
-            tecnica_id=tecnica_id,
-            inicio_localizado=inicio_localizado,
-        )
-
-    # CAMBIADO — nueva revisión del chiste existente que referenció la
-    # reconciliación (recon.chiste_id).
-    chiste_id = recon.chiste_id
-    existente = store.obtener_chiste(chiste_id)
-    version_previa = (existente or {}).get("version_actual") or 1
-    nueva_version = version_previa + 1
-
-    store.crear_revision(
-        chiste_id=chiste_id,
-        version=nueva_version,
-        contenido=estructurado.chiste_normalizado,
-        estructura_detectada=_estructura_revision(estructurado, tecnica_id),
-        estado=estructurado.estado,
-        sugerencias_mejora=estructurado.sugerencias_mejora,
+    resultado = rutear_chiste(
+        store, estructurado, recon,
+        tipo_fuente=TIPO_FUENTE, tema_id=tema_id, tecnica_id=tecnica_id,
     )
-
-    campos: dict[str, Any] = {
-        "texto_normalizado": estructurado.chiste_normalizado,
-        "hash_normalizado": recon.hash_normalizado,
-        "embedding": recon.embedding,
-        "estado": estructurado.estado,
-        "version_actual": nueva_version,
-    }
-    if tema_id is not None:
-        campos["tema_id"] = tema_id
-    if tecnica_id is not None:
-        campos["tecnica_id"] = tecnica_id
-    store.actualizar_chiste(chiste_id, **campos)
-
     return ChisteRuteado(
-        decision="CAMBIADO",
-        chiste_id=chiste_id,
-        tema_id=tema_id,
-        tecnica_id=tecnica_id,
+        decision=resultado.decision,
+        chiste_id=resultado.chiste_id,
+        tema_id=resultado.tema_id,
+        tecnica_id=resultado.tecnica_id,
         inicio_localizado=inicio_localizado,
     )
 
