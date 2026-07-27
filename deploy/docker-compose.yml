@@ -1,0 +1,44 @@
+# deploy/docker-compose.yml — Flujo B: servicio webhook en contenedor (task 38).
+#
+# Build: contexto = raíz del repo (`context: ..`) porque deploy/Dockerfile
+# necesita `src/` y `requirements.txt`, que viven ahí — no dentro de deploy/.
+# Uso típico: `docker compose -f deploy/docker-compose.yml up -d --build`
+# desde cualquier sitio, o `cd deploy && docker compose up -d --build`.
+#
+# env_file: `../.env` — relativo a la carpeta de este fichero (deploy/), o
+# sea `<raíz-del-repo>/.env`. Decisión: el .env de producción vive en la raíz
+# del repo en el VPS, el mismo sitio donde ya viven los `.env` que leen
+# scripts/run_historico.py y compañía vía python-dotenv — un único `.env`
+# por checkout, no uno nuevo solo para el contenedor. Documentado también
+# para el runbook de la task 41 (quien cree el `.env` real en el VPS debe
+# dejarlo en la raíz del checkout, junto a este docker-compose.yml un nivel
+# por debajo en deploy/).
+#
+# Task 39 (Caddy, depende de esta): añadirá aquí un segundo servicio
+# (p. ej. `caddy`) como frontend TLS en el puerto 8443, que proxea
+# internamente al servicio `webhook` de abajo por su nombre — Compose
+# resuelve los nombres de servicio como hostname dentro de la red por
+# defecto que crea para este fichero. Por eso `webhook` NO publica su
+# puerto al host (nada de `ports:`): con `expose:` basta para dejarlo
+# alcanzable solo dentro de esa red, listo para que Caddy proxee sin tener
+# que tocar nada de lo de aquí.
+
+services:
+  webhook:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    env_file:
+      - ../.env
+    restart: unless-stopped
+    expose:
+      - "8000"
+    healthcheck:
+      # Sin curl/wget instalados en python:3.12-slim por defecto — se
+      # reutiliza el intérprete Python ya presente en la imagen en vez de
+      # añadir un paquete extra solo para el healthcheck.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

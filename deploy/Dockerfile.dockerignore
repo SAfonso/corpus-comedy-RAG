@@ -1,0 +1,52 @@
+# deploy/Dockerfile.dockerignore — excluye del contexto de build lo que
+# deploy/Dockerfile no necesita (task 38).
+#
+# Por qué este nombre y no `deploy/.dockerignore`: Docker/BuildKit resuelve
+# el .dockerignore relativo a la RAÍZ DEL CONTEXTO de build, no a la carpeta
+# donde vive el Dockerfile. El contexto de esta imagen es la raíz del repo
+# (`docker build -f deploy/Dockerfile -t webhook-test .` desde la raíz, y
+# `context: ..` en docker-compose.yml) porque el build necesita `src/` y
+# `requirements.txt`, que están ahí — así que un fichero llamado
+# `deploy/.dockerignore` nunca se aplicaría a este build (comprobado
+# empíricamente: con ese nombre y esa ubicación, Docker lo ignora y copia
+# igualmente todo el árbol). BuildKit sí soporta un ignore-file específico
+# por Dockerfile con el nombre `<ruta-al-Dockerfile>.dockerignore` — este
+# fichero — que SÍ se aplica siempre, sin depender de dónde se invoque
+# `docker build` ni de añadir un `.dockerignore` genérico en la raíz del
+# repo que afectaría a builds futuros que no sean este. Verificado con un
+# build de prueba antes de fijar esta decisión.
+
+# Control de versiones y harness del agente
+.git
+.github/
+.claude/
+
+# Corpus (pesado, y de todas formas material sagrado que no debe entrar en
+# la imagen — el servicio no lo necesita para servir el webhook)
+data/
+
+# No hace falta para correr el contenedor
+tests/
+docs/
+notebooks/
+progress/
+scripts/
+deploy/
+*.md
+
+# Entornos virtuales / caches de Python locales
+.venv/
+venv/
+env/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secretos — nunca se hornean en la imagen, viajan por env_file en runtime
+.env
+.env.*
+
+.gitignore
