@@ -11,8 +11,11 @@
 > 2026-07-26), P22 (Flujo B: transporte por webhook, 200 antes del tramo LLM,
 > 2026-07-27), P23 (Flujo A: Drive real deja de estar diferido — cierra P18 —
 > con núcleo compartido `src/utils/drive_sync.py` y staging propio
-> `data/staging/theory/`, 2026-07-27) y P24 (Flujo B: deploy continuo del
-> webhook por SSH, `deploy_telegram_webhook.yml`, 2026-07-28).
+> `data/staging/theory/`, 2026-07-27), P24 (Flujo B: deploy continuo del
+> webhook por SSH, `deploy_telegram_webhook.yml`, 2026-07-28) y P25
+> (almacenamiento: `bronze`/`silver`/`gold` como schemas reales, captura
+> durable de documentos en Supabase Storage para Teoría e Histórico, Bronze
+> append-only y retirada de `/data/processed/v{N}/`, 2026-07-28).
 
 Este documento es el **punto de entrada**. La spec completa ya no vive en un solo
 fichero: está partida por módulo, colocada **dentro de `src/`**, junto al código
@@ -61,9 +64,13 @@ por un contrato común (`tipo_fuente`) y un índice de consulta compartido:
   propios ya escritos, con varios chistes por documento y remates marcados.
   Spec: `src/jokes/historico/SPEC.md` + `src/jokes/SPEC.md`.
 
-**Regla invariante de todos los flujos:** el material original es sagrado
-(`/data/raw/` para teoría, la capa Bronze para chistes). Nunca se modifica,
-elimina ni sobrescribe. Todo el trabajo ocurre aguas abajo.
+**Regla invariante de todos los flujos:** el material original es sagrado, y
+quien lo custodia es la **capa Bronze en Supabase** (tabla + Storage) para los
+tres flujos — no Google Drive, no `/data/raw/`, no `data/staging/`, que son
+espacios de trabajo editables o cachés reconstruibles (P25). Bronze es
+append-only: nunca se modifica, elimina ni sobrescribe una fila ni su objeto;
+una edición del original entra como versión nueva. Todo el trabajo ocurre aguas
+abajo.
 
 **Fuera de alcance (por ahora):**
 - Grafo de conocimiento tipo GraphRAG / Leiden clustering — descartado por
@@ -405,6 +412,135 @@ Detalle completo en el propio
 [`deploy_telegram_webhook.yml`](../../.github/workflows/deploy_telegram_webhook.yml)
 (comentario de cabecera) y, para el bootstrap manual completo que este
 workflow asume como prerequisito, el runbook de la task 41 (pendiente).
+
+**P25 (2026-07-28) — Almacenamiento: `bronze`/`silver`/`gold` como schemas
+reales y captura durable de documentos en Supabase.** Hasta aquí, "Bronze" y
+"Silver" eran una convención de nombres dentro de un único schema `public`, y
+la durabilidad del material original de los Flujos A y C descansaba de facto en
+Google Drive. P25 convierte las capas en **schemas de Postgres reales** y hace
+que **Supabase (tabla + Storage), no Drive ni el disco local, sea la garantía de
+que el original no se pierde** para los tres flujos. Esta entrada es el resumen
+ejecutivo global: el detalle por módulo lo fijan las tasks 49-52 en sus specs
+respectivas, y la ejecución las tasks 53-69.
+
+**Motivación: Drive no es una garantía de durabilidad.** No es una sospecha, es
+lo que hace el código hoy:
+- `src/utils/drive_sync.py` §`sync()` resuelve el destino local **por nombre de
+  fichero** (`self.staging_dir / self._nombre_local(archivo)`) y lo escribe con
+  `destino.write_bytes(contenido)`. Una edición en Drive (mismo `fileId`, nuevo
+  `modifiedTime`) dispara la re-descarga y **sobrescribe** el fichero anterior:
+  la versión previa deja de existir en local, sin traza.
+- El propio docstring del módulo lo dice sin rodeos: "**`staging_dir`: caché
+  local reconstruible, NO material sagrado**". Reconstruible *desde Drive* — es
+  decir, la durabilidad estaba delegada a Drive. Y Drive es un espacio de
+  trabajo editable por una persona, no un almacén append-only: editar o borrar
+  ahí un fichero edita o borra el **único** ejemplar que existe.
+- P23 ya había afinado la regla a medias ("lo sagrado es el único ejemplar que
+  existe del original; en modo Drive-real ese ejemplar vive en Drive"). P25
+  corrige la conclusión: saber dónde vive el ejemplar no lo protege. Hace falta
+  una **copia inmutable propia**, fuera del alcance de una edición manual.
+- El paliativo que tenía Teoría, `/data/processed/v{N}/` (inmutable, versionado,
+  con `manifest.json`), protegía el **producto procesado**, no el original — y
+  además está **vacío**: nunca se ha generado ningún `v{N}` real. Un versionado
+  que no ha corrido nunca no protege nada.
+- El Flujo B era el único con captura durable de verdad (`chistes_telegram_bronze`
+  en Supabase, escrita antes de cualquier tramo LLM — P22). P25 no inventa un
+  patrón nuevo: extiende ese a los Flujos A y C.
+
+**Mapeo final de tablas a schemas.** Las capas dejan de ser un sufijo en el
+nombre de la tabla (`chistes_telegram_bronze`) y pasan a ser el schema
+(`bronze.chistes_telegram`); el nombre de la tabla pierde el sufijo redundante.
+
+| Schema   | Chistes (B/C) | Teoría (A) | Histórico (C, documentos) |
+|----------|---------------|------------|---------------------------|
+| `bronze` | `bronze.chistes_telegram` (renombrada desde `chistes_telegram_bronze`; **ya existe con datos reales en producción**) | `bronze.teoria_documentos` (nueva; Storage, bucket `bronze-teoria`: PDF/EPUB/DOCX/TXT crudo de libros, apuntes **y** transcripciones WhisperX) | `bronze.historico_documentos` (nueva; Storage, bucket `bronze-historico`: el `.docx` original **con su color de fuente**) |
+| `silver` | `silver.chistes` + `chistes_revisiones`, `candidatos_taxonomia`, `temas`, `tecnicas`, `fuentes` (renombradas desde `public`; **ya existen con datos reales**) | `silver.teoria_documentos` (nueva; Storage, bucket `silver-teoria`: el `.md` limpio/traducido/normalizado) | `silver.historico_documentos` (nueva; Storage, bucket `silver-historico`: el `.md` marcado `[REMATE]`/`[CHISTOIDE]`) |
+| `gold`   | — (no aplica: el consumo de chistes es `silver.chistes`) | `gold.teoria_chunks` (renombrada desde `teoria_chunks`: chunkeado + embebido) | — (converge en `silver.chistes`) |
+
+Notas de lectura de la tabla:
+- **El color del `.docx` histórico es dato, no formato.** `marcar_remates.py`
+  lo traduce a `[REMATE]`/`[CHISTOIDE]` (P15); si se pierde el `.docx` original
+  se pierde la posibilidad de revisar o rehacer ese marcado, por eso Bronze
+  guarda el binario tal cual sale de Drive y no su derivado.
+- **Las transcripciones WhisperX viven en `bronze.teoria_documentos`**, junto a
+  libros y apuntes: son `tipo_fuente` distinto (`transcripcion_curso` vs
+  `teoria`, §2) pero el mismo flujo y la misma capa.
+- **Gold solo existe en Teoría.** Los chistes no tienen capa de consumo aparte:
+  `silver.chistes` ya es la unidad indexable.
+
+**Versionado de Bronze: append-only, nunca sobrescritura.** Cada modificación
+detectada en Drive (mismo `fileId`, `modifiedTime` distinto) genera una **fila
+nueva** con su propio objeto en el bucket. No se hace `UPDATE` de la fila
+anterior ni se pisa el objeto anterior. Clave de idempotencia:
+`(drive_file_id, modified_time)` — una re-ejecución del sync sobre material ya
+capturado no duplica nada, pero una edición real sí queda registrada como
+versión adicional. Esto es exactamente lo que hoy no ocurre en
+`data/staging/theory/` (ver evidencia arriba).
+
+**Material legacy sin metadata de Drive.** Los 7 libros y las 25 transcripciones
+que ya están en `data/raw/` vienen de la época pre-Drive-real (P18) y no tienen
+`fileId` ni `modifiedTime`. Se capturan igual, con `drive_file_id NULL`, el
+`hash_md5` del fichero como clave alternativa de idempotencia y
+`origen = 'local_legacy'` (frente a `'drive'`). La unicidad **no** puede
+expresarse con un `UNIQUE` normal: Postgres considera distintos entre sí a dos
+`NULL`, así que un `UNIQUE (drive_file_id, modified_time)` dejaría entrar
+infinitas filas legacy duplicadas. Se resuelve con **dos índices únicos
+parciales**: uno sobre `(drive_file_id, modified_time) WHERE drive_file_id IS
+NOT NULL` y otro sobre `(hash_md5) WHERE drive_file_id IS NULL`. DDL exacto en
+la task 53.
+
+**El backfill se hace ahora, no "de aquí en adelante".** El material que ya está
+en local es el más antiguo y, por tanto, el que más tiempo lleva sin copia de
+seguridad real: si la captura solo aplicase al material nuevo, lo más expuesto
+seguiría expuesto. Tasks 66-67 (script re-ejecutable + ejecución real y
+verificación de conteos).
+
+**Retirada de `/data/processed/v{N}/` como fuente de verdad.** Cuando Silver
+esté en Supabase (tasks 61-63) se **deja de generar** `v{N}`: el pipeline de
+Teoría no vuelve a escribir corpus en disco. Los `v{N}` que ya existieran no se
+borran (hoy no existe ninguno: el directorio está vacío). Qué sustituye al
+concepto de "versionado de corpus" que hoy encarna `v{N}` inmutable —y contra
+qué pasa a validar `validate_corpus.py` sin `manifest.json`— es responsabilidad
+de la spec de Teoría (task 51), no de esta entrada; aquí solo queda constancia
+de la decisión de retirada. La tabla §"Idempotencia y versionado" de este
+documento sigue describiendo el estado **actual** (`v{N}` inmutable) y se
+actualiza en la task 69, cuando la cadena esté realmente en producción.
+
+**Storage: cuatro buckets privados, uno por capa+flujo** — `bronze-teoria`,
+`silver-teoria`, `bronze-historico`, `silver-historico`. No un bucket compartido
+con prefijos: la política de acceso, el ciclo de vida y el volumen esperado son
+distintos por capa (Bronze es append-only y crece sin poda; Silver se puede
+regenerar) y por flujo, y separar buckets deja esa diferencia expresada en la
+propia infraestructura en vez de en una convención de rutas que nada obliga a
+cumplir. Todos privados: el corpus incluye material con licencia
+`personal_only` (§2, `llm-policy.md`).
+
+**Componente compartido: `src/utils/document_store.py`** (nuevo, task 58). La
+subida al bucket + el `INSERT` append-only de la fila Bronze/Silver son
+idénticos para Teoría e Histórico, así que viven una sola vez en `utils/` —
+igual que `drive_sync.py` (P23). Teoría y el Histórico lo consumen cada uno por
+su lado y **la regla de dependencias sigue intacta**: `theory/` no importa de
+`jokes/` ni al revés. `document_store.py` **no** reimplementa auth, listado ni
+idempotencia de Drive: eso sigue siendo de `drive_sync.py`, que solo se amplía
+para exponer la metadata por fichero (`fileId`, `name`, `modifiedTime`,
+`mimeType`) que la captura necesita (task 57).
+
+**Cutover sobre datos reales.** `chistes_telegram_bronze` y las tablas de
+chistes tienen datos de producción (Flujo B activo). El cambio de schema se hace
+con `ALTER TABLE ... SET SCHEMA ...` + `ALTER TABLE ... RENAME TO ...`, que son
+operaciones de **metadata** (no mueven filas), precedidas de un deploy del
+código ya *schema-aware* con el schema todavía apuntando a `public` para que no
+haya ventana rota, y seguidas del flip de configuración y el redeploy del
+webhook. Orden exacto, verificación y rollback en el runbook de la task 55;
+ejecución en la task 56.
+
+**Detalle por módulo (no se repite aquí):**
+[`src/jokes/SPEC.md`](../../src/jokes/SPEC.md) §Storage (task 49),
+[`src/utils/SPEC.md`](../../src/utils/SPEC.md) §DocumentStore y §DriveSync
+(task 50), [`src/theory/SPEC.md`](../../src/theory/SPEC.md) §Fuente de entrada,
+§Storage e §Idempotencia y versionado (task 51) y
+[`src/jokes/historico/SPEC.md`](../../src/jokes/historico/SPEC.md) §Entrada y
+etapas (task 52). DDL y migración: task 53. Ejecución y backfill: tasks 54-69.
 
 ## Metodología SDD + TDD (aplica a todo el proyecto)
 

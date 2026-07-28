@@ -25,8 +25,20 @@ cualquier discrepancia entre este fichero y un `SPEC.md`, manda el `SPEC.md`.
 | Nueva fuente, `tipo_fuente`, layout global, dependencias entre módulos | `docs/specs/00-overview.md` | `docs/specs/KNOWN_ERRORS_GLOBAL.md` |
 
 ## Regla más importante
-El material original es SAGRADO: `/data/raw/` (teoría) y la capa Bronze (chistes).
-Nunca modificar, eliminar ni sobrescribir. Todo el trabajo ocurre aguas abajo.
+El material original es SAGRADO, y quien garantiza que no se pierde es la **capa
+Bronze en Supabase** (tabla + Storage) — para los **tres** flujos: teoría,
+histórico y chistes de Telegram (P25, `docs/specs/00-overview.md`).
+Bronze es **append-only**: nunca modificar, eliminar ni sobrescribir una fila ni
+su objeto en Storage. Una edición del original entra como **fila nueva**
+(idempotencia por `(drive_file_id, modified_time)`), jamás pisando la anterior.
+Todo el trabajo ocurre aguas abajo.
+
+Ni Google Drive ni `/data/raw/` ni `data/staging/` son esa garantía: Drive es un
+espacio de trabajo editable (borrar ahí borra el único ejemplar) y el staging es
+caché reconstruible que el sync **sobrescribe** en cada modificación. `/data/raw/`
+sigue en uso operativo —es el modo por defecto de teoría cuando no se usa
+`--sync-drive`— y se sigue tratando como de solo lectura; lo que ya no es, es la
+pieza que asegura que el material sobreviva.
 
 ## Regla de dependencias
 `theory/` y `jokes/` NO se importan entre sí. Código común → `src/utils/`.
