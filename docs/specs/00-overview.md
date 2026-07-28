@@ -9,9 +9,10 @@
 > reconciliación filtrados por `tipo_fuente`, 2026-07-24), P21 (Flujo C:
 > ejecución semanal desatendida vía GitHub Actions, `run_historico_semanal.yml`,
 > 2026-07-26), P22 (Flujo B: transporte por webhook, 200 antes del tramo LLM,
-> 2026-07-27) y P23 (Flujo A: Drive real deja de estar diferido — cierra P18 —
+> 2026-07-27), P23 (Flujo A: Drive real deja de estar diferido — cierra P18 —
 > con núcleo compartido `src/utils/drive_sync.py` y staging propio
-> `data/staging/theory/`, 2026-07-27).
+> `data/staging/theory/`, 2026-07-27) y P24 (Flujo B: deploy continuo del
+> webhook por SSH, `deploy_telegram_webhook.yml`, 2026-07-28).
 
 Este documento es el **punto de entrada**. La spec completa ya no vive en un solo
 fichero: está partida por módulo, colocada **dentro de `src/`**, junto al código
@@ -355,6 +356,55 @@ obvias:
 Detalle completo en [`src/theory/SPEC.md`](../../src/theory/SPEC.md) §Fuente de
 entrada — Drive real y modo dual, y en
 [`src/utils/SPEC.md`](../../src/utils/SPEC.md) §DriveSync.
+
+**P24 (2026-07-28) — Flujo B: deploy continuo del webhook por SSH.** Tasks
+36-39 dejaron el webhook contenerizado (`deploy/Dockerfile` + `docker-compose.yml`,
+task 38) detrás de Caddy con TLS (task 39), pero corriendo a mano en el VPS
+tras el bootstrap manual de esta sesión. `.github/workflows/deploy_telegram_webhook.yml`
+(task 40) cierra el ciclo: cada push a `main` que toca Flujo B corre
+`pytest tests/unit/` como gate y, si pasa, se conecta por SSH al VPS y
+reconstruye el contenedor. Decisiones no obvias:
+- **SSH imperativo, no una plataforma de deploy.** El VPS ya tiene Coolify
+  gestionando el resto de servicios (de ahí el puerto 8443 de la task 39); montar
+  otra capa de orquestación (Coolify para esto también, o algo tipo Watchtower)
+  para un solo contenedor adicional habría sido más infraestructura que el
+  problema requiere. `git pull` + `docker compose up -d --build` por SSH es el
+  patrón imperativo más simple que cierra el ciclo: dos comandos, sin estado
+  nuevo que mantener ni un segundo sistema que aprender.
+- **El bootstrap manual precede al CI, no es responsabilidad de este workflow.**
+  El primer despliegue (clonar el repo en `~/corpusRAG`, crear el `.env` de
+  producción con los secrets reales, el primer `docker compose up -d --build`,
+  registrar el webhook con `scripts/set_telegram_webhook.py` contra el puerto
+  8443) ya se hizo a mano en esta sesión y se documenta como runbook completo
+  en la task 41 — este workflow **asume que ese checkout y ese `.env` ya
+  existen** y nunca los crea: no clona el repo si falta, no genera secrets, no
+  toca `.env`. Motivo de fondo: los secrets reales de producción (Supabase,
+  Telegram, Porkbun para Caddy) viven solo en el `.env` del VPS y **nunca
+  pasan por GitHub Actions** — los 4 secrets que sí usa este workflow
+  (`SSH_HOST`, `SSH_USER`, `SSH_PORT`, `SSH_PRIVATE_KEY`) son exclusivamente
+  para la conexión SSH, no credenciales de la aplicación.
+- **Dos jobs con `needs:`**, no un solo job con dos steps (a diferencia de
+  `run_historico_semanal.yml`, task 31, que es un solo job): el job de test no
+  necesita nada del VPS y el de deploy no debe ejecutarse en absoluto si el
+  gate falla — separarlos dibuja esa dependencia explícitamente y deja el log
+  de cada uno más legible.
+- **`paths:` filtrado** a lo que el contenedor del webhook realmente empaqueta
+  (`src/jokes/telegram/**`, `src/jokes/*.py` — contrato compartido B/C,
+  `src/utils/**`, `deploy/**`, `requirements.txt`, y el propio workflow): un
+  cambio en Flujo A o en `src/jokes/historico/**` no reconstruye ni redeploya
+  el webhook, que no los importa (regla de dependencias, `CLAUDE.md`).
+- **`appleboy/ssh-action`** en vez de `ssh-agent` manual: acción mantenida y
+  ampliamente usada para exactamente este caso (un comando remoto vía SSH),
+  sin reinventar el manejo de clave privada/known_hosts para un solo paso.
+- **Ningún secret se vuelca en logs.** `appleboy/ssh-action` recibe
+  `host`/`username`/`port`/`key` directo de `secrets.*` (GitHub Actions ya los
+  enmascara en el log por ser secrets) y el `script:` remoto no hace `echo` de
+  ninguno de ellos.
+
+Detalle completo en el propio
+[`deploy_telegram_webhook.yml`](../../.github/workflows/deploy_telegram_webhook.yml)
+(comentario de cabecera) y, para el bootstrap manual completo que este
+workflow asume como prerequisito, el runbook de la task 41 (pendiente).
 
 ## Metodología SDD + TDD (aplica a todo el proyecto)
 

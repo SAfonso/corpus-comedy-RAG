@@ -1,0 +1,96 @@
+# Flujo B: deploy continuo del webhook de Telegram al VPS (task 40).
+#
+# Dos jobs con `needs:` (mismo patrón que run_historico_semanal.yml, task 31,
+# aunque ahí es un solo job): `test` corre `pytest tests/unit/` como gate, y
+# `deploy` solo se dispara si `test` pasa, conectando por SSH al VPS para
+# actualizar el checkout ya existente. Decisión documentada en
+# docs/specs/00-overview.md, P24 (busca "P24" en ese fichero para el
+# desarrollo completo).
+#
+# Resumen de decisiones (detalle en P24):
+# - Trigger: push a `main`, filtrado por `paths:` a lo que realmente afecta al
+#   contenedor del webhook (código de Flujo B + contrato compartido B/C que
+#   importa, deploy/, requirements.txt, y este propio workflow). Un cambio en
+#   Flujo A o Flujo C no dispara un rebuild/redeploy del webhook — no lo usan.
+# - Bootstrap manual como prerequisito, NO responsabilidad de este workflow:
+#   el checkout en `~/corpusRAG` en el VPS y el `.env` de producción ya
+#   existen (se crearon a mano, ver runbook completo en la task 41). Este
+#   workflow nunca clona el repo ni escribe el `.env` — solo `git pull` sobre
+#   un checkout que asume existente. Los secrets reales de producción viven
+#   SOLO en el `.env` del VPS, nunca pasan por GitHub Actions.
+# - SSH vía `appleboy/ssh-action` (mantenida, ampliamente usada) en vez de
+#   ssh-agent manual: evita reinventar el manejo de la clave privada/known_hosts
+#   para un solo comando remoto.
+# - Comando remoto único: `cd ~/corpusRAG && git pull && docker compose -f
+#   deploy/docker-compose.yml up -d --build`. `docker compose up -d --build`
+#   es idempotente (no rompe si ya está arriba) y reconstruye solo lo que
+#   cambió en las capas de la imagen.
+# - Ningún secret se vuelca en logs/echo — `appleboy/ssh-action` ya enmascara
+#   sus propios inputs (`host`/`username`/`port`/`key`) por ser `secrets.*`.
+
+name: Flujo B — Deploy webhook de Telegram
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "src/jokes/telegram/**"
+      - "src/jokes/*.py"
+      - "src/utils/**"
+      - "deploy/**"
+      - "requirements.txt"
+      - ".github/workflows/deploy_telegram_webhook.yml"
+  workflow_dispatch: {}
+
+# Evita solapar dos deploys seguidos pisándose el `git pull`/`docker compose`
+# en el mismo VPS; no cancela un deploy ya en marcha para no dejar el
+# contenedor a medio reconstruir.
+concurrency:
+  group: deploy-telegram-webhook
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Gate — pytest tests/unit/
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: pytest tests/unit/
+        run: pytest tests/unit/ -v
+
+  deploy:
+    name: Deploy por SSH al VPS
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: git pull + docker compose up -d --build (VPS)
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          port: ${{ secrets.SSH_PORT }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+            cd ~/corpusRAG
+            git pull
+            docker compose -f deploy/docker-compose.yml up -d --build
