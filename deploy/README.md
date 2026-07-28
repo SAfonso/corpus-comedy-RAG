@@ -57,7 +57,7 @@ chmod 600 .env
 
 ### 2.2 Variables obligatorias para Flujo B
 
-Edita `~/corpusRAG/.env` (usa `nano` o tu editor preferido) y rellena **como mínimo** estas variables. El resto puede quedar vacío (no bloquea Flujo B):
+Edita `~/corpusRAG/.env` (usa `nano` o tu editor preferido) y rellena **como mínimo** estas variables. El resto de `.env.example` puede quedar vacío — **excepto el LLM/embeddings de más abajo, que sí son obligatorias** aunque no bloqueen el arranque del contenedor (fallan más tarde, en el tramo background):
 
 #### **Supabase** (almacenamiento Bronze)
 ```
@@ -117,6 +117,19 @@ TELEGRAM_WEBHOOK_URL=https://<dominio>:8443/telegram/webhook
 
 Reemplaza `<dominio>` con tu dominio real (ej: `turrabot.machango.org`). El puerto **8443 es fijo** — ver `src/jokes/telegram/SPEC.md` §"Registro del webhook" y `docs/specs/00-overview.md` P22 para el razonamiento.
 
+#### **LLM y embeddings** (obligatorias — Silver no completa sin esto)
+
+```
+LLM_API_KEY=<tu-clave>
+LLM_MODEL=<tu-modelo>
+EMBEDDINGS_API_KEY=<tu-clave>
+EMBEDDINGS_MODEL=<tu-modelo>
+```
+
+**No son opcionales para Flujo B**, aunque el contenedor arranque sin ellas: `src/jokes/silver.py::estructurar_chiste` necesita el LLM para estructurar cada chiste, y la reconciliación necesita el embedding para dedup por similitud. Sin estas variables, el webhook responde 200 y guarda en Bronze con normalidad, pero el tramo background falla siempre con `LLMClientError: LLM_API_KEY / LLM_MODEL no configuradas` y la fila queda con `procesado_at IS NULL` indefinidamente hasta que se corrija y se reprocese (§9).
+
+**Nota sobre cuota:** si usas el tier gratuito de Gemini, el límite es bajo (15 requests/min por modelo) — reprocesar varios mensajes seguidos puede agotarlo (`429 RESOURCE_EXHAUSTED`). No es un error de configuración, solo espera el `retryDelay` que indica el propio error (normalmente 50-60s) y reintenta.
+
 #### **Porkbun API Keys** (para TLS automático vía DNS-01)
 
 Necesarias para que Caddy emita certificados ACME. Se generan en [Porkbun](https://porkbun.com):
@@ -152,6 +165,16 @@ docker compose ps
 ```
 
 Espera a que ambos contenedores (webhook y caddy) estén en estado **Up** (no Restarting).
+
+### 3.0 Abrir el puerto 8443 en el firewall de red del proveedor
+
+**Paso fácil de olvidar** (bloqueó el primer despliegue real, 2026-07-28): que `docker compose ps` muestre el puerto publicado (`0.0.0.0:8443->8443/tcp`) NO significa que sea alcanzable desde internet — muchos proveedores de VPS filtran todo el tráfico entrante salvo 22/80/443 por defecto en un firewall de red **externo al propio servidor** (no es `ufw` ni `iptables`, es un panel web del proveedor). En Hetzner Cloud: **Firewalls** → crear o editar el firewall asignado al servidor → **Inbound** → regla `TCP`, puerto `8443`, source `0.0.0.0/0`. Puedes crear un firewall nuevo solo para esta regla y asignarlo al mismo servidor sin tocar el que ya usa Coolify — los firewalls asignados a un servidor se suman (unión de reglas), no hace falta duplicar nada.
+
+Verifica desde **fuera** del VPS (tu propia máquina, no por SSH):
+```bash
+curl -v https://<dominio>:8443/health
+```
+Si da timeout total (no rechaza, simplemente no responde nunca), es casi siempre este firewall externo, no el contenedor ni Docker.
 
 ### 3.1 Verificar logs
 
@@ -349,6 +372,7 @@ Muestra ambos simultáneamente.
    ```bash
    grep TELEGRAM_ALLOWED_CHAT_IDS .env
    ```
+5. **`getWebhookInfo` muestra `"last_error_message": "Connection timed out"` y `pending_update_count > 0`** — el contenedor y el registro están bien, pero algo delante del VPS bloquea el tráfico entrante al puerto 8443. Comprobado en producción (2026-07-28): con `docker-proxy` escuchando en `0.0.0.0:8443` (`sudo ss -tlnp | grep 8443`) y sin reglas de bloqueo en `iptables` (`DOCKER-USER`/`DOCKER-FORWARD` limpias), la causa era el **firewall de red del proveedor** (Hetzner Cloud Firewall), que por defecto solo abre 22/80/443. Solución: crear una regla inbound `TCP 8443` desde `0.0.0.0/0` en el firewall de Hetzner asignado al servidor (puede ser un firewall nuevo y separado del de Coolify — las reglas de varios firewalls asignados al mismo servidor se suman, no hace falta duplicar las reglas existentes). Verificar con `curl -v https://<dominio>:8443/health` desde fuera del VPS; si responde `200`, Telegram reintentará solo y entregará el backlog (`pending_update_count` baja a `0`) sin tener que re-registrar el webhook.
 
 ### `ConfiguracionInvalidaError: TELEGRAM_WEBHOOK_SECRET_TOKEN no configurada`
 **Causa:** La variable no está en el `.env` o está vacía.
@@ -389,6 +413,26 @@ Si ves errores de Supabase (ej: `RLS policy`, `connection refused`), verifica:
 - `SUPABASE_URL` y `SUPABASE_SERVICE_KEY` son correctos.
 - La tabla `chistes_telegram_bronze` existe en Supabase.
 - El schema.sql se ha aplicado correctamente.
+
+**Dos causas reales vistas en el primer despliegue en producción (2026-07-28)** — el mensaje SÍ llega a Bronze (el diseño de recuperación, task 46/47, garantiza que esto nunca se pierde: la fila queda con `procesado_at IS NULL` y el error se loguea), pero el tramo Silver falla:
+
+1. **`LLMClientError: LLM_API_KEY / LLM_MODEL no configuradas en el entorno (.env)`** — el bootstrap del `.env` (§2.2) marcaba estas variables como "opcionales, no bloquean Flujo B", lo cual es **incorrecto**: Silver necesita el LLM para estructurar el chiste (`src/jokes/silver.py::estructurar_chiste`), así que `LLM_API_KEY`/`LLM_MODEL` (y `EMBEDDINGS_API_KEY`/`EMBEDDINGS_MODEL` para la reconciliación por similitud) **son obligatorias** para que el tramo background complete con éxito, aunque el webhook arranque igual sin ellas. Solución: añadirlas al `.env` del VPS y `docker compose up -d --force-recreate webhook`.
+2. **`google.genai.errors.ClientError: 429 RESOURCE_EXHAUSTED`** — el tier gratuito de Gemini limita a 15 requests/min por modelo. Con varios mensajes reprocesándose seguidos (cada uno hace 1-2 llamadas: estructurar + resolver taxonomía) se agota rápido. No es un error de configuración — el propio mensaje de Google incluye `retryDelay` (unos 50-60s). Solución: esperar ese tiempo y volver a correr `scripts/reprocesar_bronze_pendiente.py` (es re-ejecutable, solo reintenta lo que sigue con `procesado_at IS NULL`).
+
+**Recuperar mensajes que quedaron con `procesado_at IS NULL`** (por cualquiera de las dos causas de arriba, o cualquier otro fallo transitorio del tramo background):
+```bash
+cd ~/corpusRAG
+(set -a; source .env; python scripts/reprocesar_bronze_pendiente.py)
+```
+
+### `column chistes_telegram_bronze.procesado_at does not exist` (o cualquier columna de `schema.sql` ausente)
+**Causa:** `schema.sql` es la fuente de verdad del esquema en el repo, pero **no se aplica solo — cada cambio de esquema requiere ejecutarlo a mano** en el SQL Editor del dashboard de Supabase del proyecto real. Si se añadió una columna a `schema.sql` en un commit posterior a la última vez que se aplicó el esquema completo (ej. `procesado_at`, añadida en la task 46 para la recuperación post-200), la base de datos real queda desincronizada — visto en el primer despliegue en producción (2026-07-28), causaba un `42703` de PostgREST al intentar leer/escribir esa columna.
+
+**Solución:** en el SQL Editor de Supabase (proyecto → SQL Editor → New query), ejecutar el `ALTER TABLE` correspondiente a la columna que falte, ej.:
+```sql
+alter table chistes_telegram_bronze add column if not exists procesado_at timestamptz;
+```
+Antes de dar por cerrado cualquier cambio a `schema.sql`, comprobar que se aplicó también contra el proyecto Supabase real — no solo que el fichero del repo lo tenga.
 
 ### El contenedor de webhook está en crash-loop sin mensaje claro
 ```bash
