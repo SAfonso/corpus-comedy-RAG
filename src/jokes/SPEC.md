@@ -369,54 +369,271 @@ y el timing no sobreviven a la traducción automática).
 **Metadatos** (columnas Supabase): `tipo_fuente`, `tema_id`, `tecnica_id`,
 `fuente_id`, `estado`, `version_actual`, `chiste_origen_id`, `licencia`.
 
-## Storage — esquema de tablas (boceto, se refina en implementación)
+## Storage — schemas, tablas y acceso
 
-**Topología híbrida:** los chistes viven nativos en Supabase (a diferencia de
-teoría, que tiene ficheros `v{N}` como fuente de verdad — ver
-`src/theory/SPEC.md`). `pgvector` es el índice único de consulta del RAG,
-compartido con teoría; toda consulta filtra por `tipo_fuente`.
+> Sección reescrita por la **task 49** para materializar
+> [P25](../../docs/specs/00-overview.md) (`bronze`/`silver`/`gold` como
+> **schemas de Postgres reales**). Esta sección es la **referencia técnica**
+> que citan el DDL y la migración (task 53), el paso a cliente *schema-aware*
+> (task 54), el runbook de cutover (task 55) y su ejecución (task 56). Aquí se
+> fija **qué schema le corresponde a cada tabla y cómo se accede**; no se
+> escribe DDL ni código.
+
+**Topología híbrida:** los chistes viven nativos en Supabase, como filas
+(a diferencia de teoría, que además maneja documentos completos —crudo y
+limpio— cuyo destino lo fija `src/theory/SPEC.md`, task 51). `pgvector` es el
+índice único de consulta del RAG, compartido con teoría; toda consulta filtra
+por `tipo_fuente`.
 
 **"Grafo ligero" relacional (no GraphRAG):** las relaciones se modelan con
 columnas explícitas (`tema_id`, `tecnica_id`, `fuente_id`), combinando filtro
 relacional + ranking vectorial. No hay clustering Leiden ni grafo de conocimiento.
 
+### Las capas son schemas, no sufijos en el nombre
+
+Hasta P25, "Bronze" y "Silver" eran una **convención de nombres** dentro de un
+único schema `public` (`chistes_telegram_bronze`). Ahora la capa es el
+**schema** y el nombre de la tabla pierde el sufijo redundante:
+`bronze.chistes_telegram`. **Convenio de nombres:** el nombre de la tabla no
+repite su capa — la capa ya la dice el schema, y un
+`bronze.chistes_telegram_bronze` sería ruido que además se desincroniza si la
+tabla cambiara de capa. Regla ya cerrada en P25: no se redecide aquí.
+
+Ninguna columna cambia en esta reorganización. Lo único que cambia de las
+tablas de este módulo es **dónde viven** (schema) y, en un caso, **cómo se
+llaman**.
+
+### Mapeo final tabla → schema (alcance de este spec)
+
+| Schema   | Tabla (nombre nuevo)         | Nombre actual en `public`  | Escribe / lee                                                        |
+|----------|------------------------------|----------------------------|----------------------------------------------------------------------|
+| `bronze` | `bronze.chistes_telegram`    | `chistes_telegram_bronze`  | Flujo B (`telegram/SPEC.md` §Bronze) vía `supabase_store.py`         |
+| `silver` | `silver.chistes`             | `chistes`                  | B y C (§Routing) vía `supabase_store.py`                              |
+| `silver` | `silver.chistes_revisiones`  | `chistes_revisiones`       | B y C (§Versionado, append-only)                                      |
+| `silver` | `silver.temas`               | `temas`                    | B y C (§Taxonomías) + edición humana                                  |
+| `silver` | `silver.tecnicas`            | `tecnicas`                 | B y C (§Taxonomías) + edición humana                                  |
+| `silver` | `silver.fuentes`             | `fuentes`                  | B y C (§Taxonomías); **también** la referencia Teoría (ver FK abajo)  |
+| `silver` | `silver.candidatos_taxonomia`| `candidatos_taxonomia`     | B y C (§Taxonomías, cola de revisión humana)                          |
+| `gold`   | `gold.teoria_chunks`         | `teoria_chunks`            | Flujo A (`src/theory/teoria_store.py`), **no** `supabase_store.py`    |
+
+Notas de lectura:
+
+- **`bronze.chistes_telegram` es la única tabla Bronze de este módulo.** El
+  Flujo C no tiene Bronze *de chistes*: su Bronze son **documentos**
+  (`bronze.historico_documentos`, en Storage), especificado en
+  [`src/jokes/historico/SPEC.md`](historico/SPEC.md) (task 52), no aquí. Igual
+  para `bronze.teoria_documentos`/`silver.teoria_documentos`
+  ([`src/theory/SPEC.md`](../theory/SPEC.md), task 51) y el componente
+  compartido que los escribe ([`src/utils/SPEC.md`](../utils/SPEC.md) §DocumentStore,
+  task 50). Este spec **no** define esas cuatro tablas.
+- **No hay `gold` de chistes.** `silver.chistes` ya es la unidad indexable que
+  consume el RAG; no existe una capa de consumo aparte (P25).
+- **`gold.teoria_chunks` es contenido de Teoría, pero su DDL vive en este
+  `schema.sql`** — igual que hoy: "`teoria_chunks` se incluye aquí para tener
+  el esquema completo en un solo fichero", con su cliente de acceso fuera de
+  este módulo (`src/theory/teoria_store.py`, task 21). Se mantiene esa
+  convención: `supabase_store.py` **no** la expone y sigue sin importar nada de
+  `src/theory/` (regla de dependencias de `CLAUDE.md`).
+- **Ambos renombrados son de metadata.** `ALTER TABLE ... SET SCHEMA` +
+  `ALTER TABLE ... RENAME TO` no mueven filas ni reescriben la tabla: los datos
+  de producción de `chistes_telegram_bronze` y de las tablas de chistes
+  sobreviven intactos (orden exacto y verificación: runbook de la task 55).
+
+### Esquema de columnas (idéntico al actual, solo cualificado por schema)
+
 ```sql
-chistes (
+silver.chistes (
   id                uuid primary key,
   texto_normalizado text,
   hash_normalizado  text,              -- dedup exacto (§Reconciliación)
   embedding         vector,            -- similitud (§Reconciliación) + retrieval RAG
   tipo_fuente       text,              -- propio | propio_historico
-  tema_id           bigint references temas(id),
-  tecnica_id        bigint references tecnicas(id),
-  fuente_id         bigint references fuentes(id),
+  tema_id           bigint references silver.temas(id),
+  tecnica_id        bigint references silver.tecnicas(id),
+  fuente_id         bigint references silver.fuentes(id),
   estado            text,              -- idea_suelta|con_estructura|rematado
   version_actual    int,
-  chiste_origen_id  uuid references chistes(id),  -- linaje de variante (§Versionado)
+  chiste_origen_id  uuid references silver.chistes(id),  -- linaje de variante (§Versionado)
   licencia          text default 'comercializable',
   created_at, updated_at timestamptz
 )
-chistes_revisiones (
-  id, chiste_id uuid references chistes(id),
+silver.chistes_revisiones (
+  id, chiste_id uuid references silver.chistes(id),
   version int, contenido text,
   estructura_detectada jsonb, estado text, sugerencias_mejora text,
   created_at timestamptz              -- append-only (madurez, §Versionado)
 )
-temas      (id, nombre, created_at)               -- editable (§Taxonomías)
-tecnicas   (id, nombre, created_at)               -- editable (§Taxonomías)
-fuentes    (id, nombre, tipo_fuente, licencia)
-candidatos_taxonomia (
+silver.temas      (id, nombre, created_at)          -- editable (§Taxonomías)
+silver.tecnicas   (id, nombre, created_at)          -- editable (§Taxonomías)
+silver.fuentes    (id, nombre, tipo_fuente, licencia)
+silver.candidatos_taxonomia (
   id, tipo text,                       -- 'tema' | 'tecnica'
   texto text, propuesto_por text,
   estado text default 'pendiente',     -- pendiente|aceptado|rechazado
   created_at timestamptz
 )
-teoria_chunks (                        -- ingesta de teoría, ver src/theory/SPEC.md
-  id, doc_id, version_corpus,          -- v{N} de procedencia
-  contenido text, embedding vector,
-  tipo_fuente text, fuente_id, licencia default 'personal_only'
+bronze.chistes_telegram (              -- captura literal e inmutable (telegram/SPEC.md §Bronze)
+  id                 uuid primary key,
+  telegram_update_id bigint not null unique,  -- idempotencia por evento
+  chat_id            bigint,
+  texto_raw          text not null,   -- literal, sagrado, nunca se reescribe
+  timestamp_telegram timestamptz,
+  procesado_at       timestamptz,     -- NULL hasta que el pipeline completó (tasks 46/47)
+  created_at         timestamptz
+)
+gold.teoria_chunks (                   -- ingesta de teoría, ver src/theory/SPEC.md
+  id, doc_id, version_corpus,
+  chunk_index int, contenido text, embedding vector,
+  tipo_fuente text,
+  fuente_id bigint references silver.fuentes(id),   -- FK CROSS-SCHEMA, ver abajo
+  licencia default 'personal_only',
+  unique (doc_id, version_corpus, chunk_index)
 )
 ```
+
+**Regla de escritura de Bronze (invariante, `CLAUDE.md`):**
+`bronze.chistes_telegram` es **append-only**. La única escritura posterior al
+INSERT admitida es el `UPDATE` de bookkeeping de `procesado_at` (tasks 46/47),
+que **no toca `texto_raw`** ni ninguna otra columna de contenido.
+
+### FK cross-schema: `gold.teoria_chunks.fuente_id` → `silver.fuentes(id)`
+
+`fuentes` se queda en `silver` (es taxonomía editable del contrato B/C,
+§Taxonomías) y `teoria_chunks` se va a `gold`, así que la FK que hoy es
+intra-`public` pasa a **cruzar schemas**. Detalle que el implementer del DDL
+(task 53) necesita saber:
+
+- **En Postgres una FK cross-schema funciona exactamente igual que una normal**
+  — misma sintaxis, misma semántica de integridad referencial, mismo coste. No
+  hay restricción alguna sobre que referenciante y referenciado vivan en
+  schemas distintos (sí la hay entre bases de datos distintas, que no es el
+  caso). Lo único que cambia es que la referencia debe ir **cualificada con el
+  schema** (`references silver.fuentes(id)`) salvo que `silver` esté en el
+  `search_path` de la sesión que ejecuta el DDL. **Se cualifica siempre**, de
+  forma explícita, para no depender del `search_path` — mismo criterio que ya
+  se aplicó a `create extension ... schema public` en `schema.sql` (donde
+  depender del `search_path` ya produjo un fallo real, 42704).
+- **Orden de creación:** `silver.fuentes` debe existir **antes** que
+  `gold.teoria_chunks`. El orden de `schema.sql` (taxonomías primero) ya lo
+  garantiza, pero ahora el motivo es más fácil de pasar por alto porque las dos
+  tablas están en bloques de schema distintos del fichero.
+- **El renombrado no rompe la FK.** `ALTER TABLE ... SET SCHEMA` conserva las
+  constraints existentes (apuntan a OIDs, no a nombres), así que mover
+  `fuentes` a `silver` y `teoria_chunks` a `gold` mantiene la FK viva sin
+  recrearla. La cualificación de arriba aplica a la creación **desde cero** en
+  un proyecto nuevo, no al cutover.
+
+### `pgvector` sigue en `public` — verificar el `search_path`
+
+P25 **no** mueve la extensión: `create extension if not exists vector schema
+public` se mantiene tal cual. Consecuencia: el tipo `vector` que usan
+`silver.chistes.embedding` y `gold.teoria_chunks.embedding` vive en `public`
+aunque las tablas ya no.
+
+Esto funciona **siempre que `public` esté en el `search_path` de la sesión**.
+El rol `service_role` de Supabase lo tiene por defecto (`"$user", public`), así
+que la expectativa es que no haga falta nada extra. **Pero es una expectativa,
+no un hecho verificado en este proyecto**: el síntoma exacto de que falle ya se
+ha visto aquí (`42704: type "vector" does not exist`, documentado en el
+comentario de cabecera de `schema.sql`), solo que por el motivo simétrico (la
+extensión instalada fuera de `public`).
+
+**Acción para el implementer de las tasks 53/56:** al aplicar el DDL, si
+apareciera `42704` sobre el tipo `vector` en una tabla de `bronze`/`silver`/
+`gold`, la causa es el `search_path`, y la solución es **cualificar el tipo**
+(`embedding public.vector`) o añadir `public` al `search_path` de la sesión —
+nunca reinstalar la extensión en otro schema (rompería las tablas que ya la
+usan). Si aparece, se documenta en `src/jokes/KNOWN_ERRORS.md`.
+
+### Acceso por schema con `supabase-py` (contrato para `supabase_store.py`)
+
+`supabase_store.py` es el **único punto de acceso** a las tablas de este
+contrato, y hoy hace `self.client.table("chistes")` — que va implícitamente
+contra `public`, el único schema que PostgREST expone por defecto. El cliente
+`supabase-py` admite seleccionar el schema **antes** de la tabla:
+
+```python
+self.client.schema("bronze").table("chistes_telegram")   # en vez de .table("chistes_telegram_bronze")
+self.client.schema("silver").table("chistes")            # en vez de .table("chistes")
+```
+
+`.schema(...)` devuelve un cliente PostgREST apuntando a ese schema (envía las
+cabeceras `Accept-Profile`/`Content-Profile`); el resto de la cadena
+(`select`/`insert`/`update`/`upsert`/`eq`/`is_`/`execute`) **no cambia**.
+
+**Contrato que fija este spec** — qué schema le corresponde a cada método:
+
+| Método de `SupabaseStore`                       | Schema   | Tabla                 |
+|--------------------------------------------------|----------|-----------------------|
+| `crear_chiste`, `obtener_chiste`, `actualizar_chiste`, `listar_candidatos_reconciliacion` | `silver` | `chistes`             |
+| `crear_revision`, `listar_revisiones`            | `silver` | `chistes_revisiones`  |
+| `listar_temas`, `crear_tema`                     | `silver` | `temas`               |
+| `listar_tecnicas`, `crear_tecnica`               | `silver` | `tecnicas`            |
+| `listar_fuentes`, `crear_fuente`                 | `silver` | `fuentes`             |
+| `crear_candidato_taxonomia`, `listar_candidatos_taxonomia`, `actualizar_candidato_taxonomia` | `silver` | `candidatos_taxonomia` |
+| `guardar_mensaje_telegram_bronze`, `marcar_telegram_bronze_procesado`, `listar_telegram_bronze_pendientes` | `bronze` | `chistes_telegram`    |
+| — (`gold.teoria_chunks` no se expone aquí)       | `gold`   | `teoria_chunks` → `src/theory/teoria_store.py` |
+
+**Qué NO fija este spec.** *Cómo* se refactoriza `supabase_store.py` para
+cumplir esta tabla —constante de módulo, variable de entorno, helper privado,
+firma de los métodos— es decisión del implementer de la **task 54**, dentro de
+su scope. La única restricción que viene de aquí, además del mapeo de arriba,
+es la que ya lleva esa task en el backlog: el **valor por defecto sigue
+apuntando a `public`** hasta el cutover, para que el código *schema-aware*
+pueda desplegarse antes de mover las tablas y no exista una ventana en la que
+el código busque un schema que todavía no existe. El **flip** de ese valor por
+defecto es un paso del runbook (task 55), no del refactor.
+
+Los nombres de tabla que hoy aparecen literales en tests y scripts
+(`chistes_telegram_bronze` en `tests/unit/jokes/test_supabase_store.py`,
+`tests/integration/test_telegram_bot_live.py`, `deploy/README.md`) se
+actualizan con la task 54/55 correspondiente, no aquí.
+
+### Exposed schemas + GRANTs — paso MANUAL, no código
+
+Igual que `schema.sql` se aplica a mano en el SQL Editor (la API REST con
+`SUPABASE_SERVICE_KEY` no ejecuta DDL), la habilitación de los schemas nuevos
+es **manual**. Sin estos dos pasos, `.schema("bronze")` falla aunque la tabla
+exista y los datos estén bien:
+
+1. **Exponer los schemas en PostgREST.** Supabase Dashboard → **Settings → API
+   → "Exposed schemas"**: añadir `bronze`, `silver` y `gold` (por defecto solo
+   `public` está expuesto). Un schema no expuesto devuelve error de PostgREST
+   ante cualquier petición, no una tabla vacía.
+2. **Conceder privilegios a `service_role`** (el rol de
+   `SUPABASE_SERVICE_KEY`, el único que usa este pipeline), en el SQL Editor:
+
+   ```sql
+   grant usage on schema bronze, silver, gold to service_role;
+   grant all on all tables in schema bronze, silver, gold to service_role;
+   alter default privileges in schema bronze, silver, gold
+     grant all on tables to service_role;
+   ```
+
+   La tercera sentencia es la que evita el error recurrente: `grant ... on all
+   tables` solo afecta a las tablas **que existen en ese momento**, así que una
+   tabla creada después (p. ej. las de documentos de las tasks 51/52) quedaría
+   inaccesible hasta repetir el GRANT a mano. `alter default privileges` lo
+   resuelve de una vez para las futuras.
+
+**Notas de verificación para quien ejecute el cutover (tasks 55/56):**
+
+- **Secuencias:** `temas`, `tecnicas`, `fuentes` y `candidatos_taxonomia` usan
+  `bigint generated always as identity`, cuya secuencia es interna a la columna
+  y **no** requiere un GRANT propio (a diferencia de `serial`). Si aun así
+  apareciera un `permission denied for sequence`, la red de seguridad es
+  `grant usage, select on all sequences in schema silver to service_role;` —
+  documentar en `KNOWN_ERRORS.md` si llega a hacer falta.
+- **Caché de esquema de PostgREST:** tras mover o crear tablas puede seguir
+  respondiendo con el esquema viejo (síntoma conocido: `PGRST204 ... could not
+  find the column ... in the schema cache`, ver
+  `docs/specs/KNOWN_ERRORS_GLOBAL.md`). Se fuerza el refresco con
+  `notify pgrst, 'reload schema';` — comprobación obligatoria antes de dar el
+  cutover por bueno.
+- **No se concede nada a `anon` ni a `authenticated`.** El corpus incluye
+  material con licencia `personal_only` (`docs/specs/llm-policy.md`) y ningún
+  cliente público lo consume: exponer los schemas a PostgREST no debe
+  confundirse con abrirlos a la clave anónima.
 
 ## Stack
 
