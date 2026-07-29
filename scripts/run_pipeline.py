@@ -37,6 +37,11 @@ Esquema del resumen (siempre las mismas claves, ver `construir_resumen`):
           "version_corpus": "v3", "num_nuevos": N, "num_duplicados": M,
           # si ejecutada=false:
           "motivo": "..." | "error": "..."
+      },
+      "bronze": {
+          "activada": true | false,
+          # si activada=false por --sin-captura-bronze (solo con --sync-drive):
+          "omitida": true
       }
     }
 
@@ -59,8 +64,12 @@ Esquema del resumen (siempre las mismas claves, ver `construir_resumen`):
   un consumidor externo sin exit code fiable. **Incluye el fallo de
   configuración de `--sync-drive`** (p.ej. `RuntimeError` de
   `desde_entorno()` por falta de `DRIVE_FOLDER_ID`, ver §`--sync-drive`
-  abajo) — no es un caso nuevo, es exactamente "fallo fatal inesperado antes
-  de completar el run", así que reutiliza el mismo exit code, no uno nuevo.
+  abajo) **y el fallo de configuración de la captura Bronze** (p.ej.
+  `DocumentStoreError` de `DocumentStore()` por falta de `SUPABASE_URL`/
+  `SUPABASE_SERVICE_KEY`, ver §`--capturar-bronze` / `--sin-captura-bronze`
+  abajo) — ninguno de los dos es un caso nuevo, son exactamente "fallo fatal
+  inesperado antes de completar el run", así que reutilizan el mismo exit
+  code, no uno nuevo.
 
 ## `--sync-drive` (task 45, P23) — etapa 0 opcional de Drive real
 
@@ -76,6 +85,33 @@ ocurre DENTRO del mismo `try` que ya envuelve la llamada a `run_pipeline_fn`
 — un fallo ahí (típicamente `DRIVE_FOLDER_ID` sin definir) se trata igual que
 cualquier fallo fatal de `run_pipeline`: exit code `3`, mismo resumen JSON de
 error (ver arriba).
+
+## `--capturar-bronze` / `--sin-captura-bronze` (task 59, P25) — captura Bronze
+
+Construye un `DocumentStore` (vía `crear_document_store_fn`, inyectable, por
+defecto `src.utils.document_store.DocumentStore`) y lo pasa a
+`run_pipeline_fn(..., document_store=<instancia>)` para la etapa 0.5 (ver
+`src/theory/pipeline.py`). El criterio de activación es asimétrico a
+propósito (ver `src/theory/SPEC.md` §"Captura Bronze", "Modo Drive-real: la
+captura va por defecto" / "Modo solo-local: la captura es opt-in"):
+
+- Con `--sync-drive`: la captura está activa **por defecto**; `--sin-captura-bronze`
+  la desactiva (para depurar el sync sin escribir en Supabase). Un modo de
+  producción donde la durabilidad dependa de acordarse de un flag no es una
+  garantía.
+- Sin `--sync-drive` (modo solo-local): la captura está **desactivada por
+  defecto** — capturar en cada corrida convertiría el comando sin flags (el
+  de desarrollo/tests, que no exige credenciales) en uno que falla sin
+  `SUPABASE_URL`. `--capturar-bronze` la activa explícitamente para quien
+  cura `data/raw/` a mano y quiere durabilidad en el mismo comando.
+
+La construcción de `DocumentStore` ocurre DENTRO del mismo `try` que ya
+envuelve `run_pipeline_fn`/`drive_sync_instance`: un fallo de configuración de
+Supabase (típicamente `SUPABASE_URL`/`SUPABASE_SERVICE_KEY` ausentes) reutiliza
+el mismo exit code `3` de "fallo fatal antes de completar el run" — mismo
+criterio que `DRIVE_FOLDER_ID` con `--sync-drive`. El resumen JSON lleva
+`bronze.activada` siempre, y `bronze.omitida=true` en el caso explícito
+`--sync-drive --sin-captura-bronze` (contractual, ver `src/theory/SPEC.md`).
 
 ## `--ingest` cuando no había nada pendiente
 
@@ -119,6 +155,7 @@ if str(_REPO_ROOT) not in sys.path:
 from src.theory.drive_sync import desde_entorno  # noqa: E402
 from src.theory.ingest_teoria import ResultadoIngesta, ingestar_version  # noqa: E402
 from src.theory.pipeline import ResultadoPipeline, run_pipeline  # noqa: E402
+from src.utils.document_store import DocumentStore  # noqa: E402
 
 _PATRON_VERSION_DIR = re.compile(r"^v(\d+)$")
 
@@ -154,6 +191,18 @@ def construir_resumen(resultado: ResultadoPipeline, ingesta: Optional[dict]) -> 
         "version_dir": str(resultado.version_dir) if resultado.version_dir is not None else None,
         "ingesta": ingesta,
     }
+
+
+def _resumen_bronze(activada: bool, omitida: bool) -> dict:
+    """Construye la clave `bronze` del resumen (task 59, ver docstring del
+    módulo §--capturar-bronze / --sin-captura-bronze). `omitida=True` es
+    contractual para el caso `--sync-drive --sin-captura-bronze`; el resto de
+    la forma (`activada` siempre presente) es criterio de esta implementación,
+    consistente con cómo `ingesta`/`error_fatal` documentan su propio estado."""
+    bronze: dict = {"activada": activada}
+    if omitida:
+        bronze["omitida"] = True
+    return bronze
 
 
 def _exit_code(resultado: ResultadoPipeline, ingest_fallo: bool) -> int:
@@ -250,6 +299,32 @@ def _construir_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--capturar-bronze",
+        dest="capturar_bronze",
+        action="store_true",
+        help=(
+            "Activa la captura Bronze (etapa 0.5, ver src/theory/SPEC.md "
+            "#Captura Bronze) en modo solo-local (sin --sync-drive), donde "
+            "por defecto NO corre (para no exigir SUPABASE_URL/"
+            "SUPABASE_SERVICE_KEY en el modo de desarrollo/tests). Sin "
+            "efecto si --sync-drive esta presente (ahi la captura ya va por "
+            "defecto, ver --sin-captura-bronze)."
+        ),
+    )
+    parser.add_argument(
+        "--sin-captura-bronze",
+        dest="sin_captura_bronze",
+        action="store_true",
+        help=(
+            "Desactiva la captura Bronze (etapa 0.5) en modo --sync-drive, "
+            "donde por defecto SI corre (P25: la durabilidad del original no "
+            "puede depender de acordarse de un flag). Util para depurar el "
+            "sync sin escribir en Supabase. Sin efecto sin --sync-drive (ahi "
+            "la captura ya esta desactivada por defecto, ver "
+            "--capturar-bronze)."
+        ),
+    )
+    parser.add_argument(
         "--drive-staging-dir",
         dest="drive_staging_dir",
         type=Path,
@@ -291,14 +366,26 @@ def main(
     ingestar_version_fn: Callable[..., ResultadoIngesta] = ingestar_version,
     crear_store_fn: Callable[[], object] = _crear_store_por_defecto,
     crear_drive_sync_fn: Callable[..., Any] = desde_entorno,
+    crear_document_store_fn: Callable[[], Any] = DocumentStore,
 ) -> int:
     """Entrada del CLI. `run_pipeline_fn`/`ingestar_version_fn`/`crear_store_fn`/
-    `crear_drive_sync_fn` son inyectables (ver
+    `crear_drive_sync_fn`/`crear_document_store_fn` son inyectables (ver
     `tests/unit/scripts/test_run_pipeline_cli.py`); en producción son los
     componentes reales de Flujo A. `crear_drive_sync_fn` solo se invoca si
-    `--sync-drive` está presente (ver docstring del módulo, §--sync-drive)."""
+    `--sync-drive` está presente (ver docstring del módulo, §--sync-drive).
+    `crear_document_store_fn` solo se invoca si la captura Bronze queda
+    activada según `--sync-drive`/`--capturar-bronze`/`--sin-captura-bronze`
+    (ver docstring del módulo, §--capturar-bronze / --sin-captura-bronze)."""
     parser = _construir_parser()
     args = parser.parse_args(argv)
+
+    # Activación asimétrica (ver docstring del módulo): con --sync-drive la
+    # captura va por defecto (--sin-captura-bronze la apaga); sin
+    # --sync-drive, va apagada por defecto (--capturar-bronze la enciende).
+    captura_bronze_activada = (
+        args.sync_drive and not args.sin_captura_bronze
+    ) or (not args.sync_drive and args.capturar_bronze)
+    bronze_omitida = args.sync_drive and args.sin_captura_bronze
 
     try:
         drive_sync_instance: Optional[Any] = None
@@ -308,6 +395,10 @@ def main(
                 state_path=args.drive_state_path,
             )
 
+        document_store_instance: Optional[Any] = None
+        if captura_bronze_activada:
+            document_store_instance = crear_document_store_fn()
+
         kwargs_run_pipeline: dict = {
             "directorio_procesado": args.directorio_procesado,
             "ruta_estado": args.ruta_estado,
@@ -315,12 +406,15 @@ def main(
         }
         if drive_sync_instance is not None:
             kwargs_run_pipeline["drive_sync"] = drive_sync_instance
+        if document_store_instance is not None:
+            kwargs_run_pipeline["document_store"] = document_store_instance
 
         resultado = run_pipeline_fn(args.carpetas, **kwargs_run_pipeline)
     except Exception as exc:  # noqa: BLE001 — red de seguridad, ver §Semántica de exit codes
         print(f"run_pipeline: fallo fatal antes de completar el run: {exc}", file=sys.stderr)
         resumen = construir_resumen(ResultadoPipeline(), None)
         resumen["error_fatal"] = str(exc)
+        resumen["bronze"] = _resumen_bronze(captura_bronze_activada, bronze_omitida)
         _emitir_resumen(resumen, args.summary_out)
         return 3
 
@@ -369,6 +463,7 @@ def main(
                 )
 
     resumen = construir_resumen(resultado, ingesta_info)
+    resumen["bronze"] = _resumen_bronze(captura_bronze_activada, bronze_omitida)
     _emitir_resumen(resumen, args.summary_out)
 
     return _exit_code(resultado, ingest_fallo)

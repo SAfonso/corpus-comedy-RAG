@@ -11,15 +11,19 @@ conecta:
       -> LanguageNormalizer -> QualityScorer -> FormatNormalizer
       -> /data/processed/v{N}/
 
-## Etapa 0 opcional: `drive_sync` (task 45, P23)
+## Etapa 0 opcional: `drive_sync` (task 45, P23; contrato ampliado task 59, P25)
 
 Ver `src/theory/SPEC.md` §"Fuente de entrada — Drive real y modo dual (P23)"
 para el contrato completo (ya fijado, no se rediseña aquí). Resumen: `run_pipeline`
-recibe un parámetro `drive_sync` inyectable (duck-typed: `.sync() -> list[Path]`
-+ atributo `.staging_dir: Path` — p.ej. `src.theory.drive_sync.DriveSyncTeoria`,
-pero tipado aquí como `Any` deliberadamente para no forzar el import de
-`src.theory.drive_sync`, ni de sus dependencias de `google-api-python-client`,
-en callers/tests que solo usan el modo solo-local).
+recibe un parámetro `drive_sync` inyectable (duck-typed: `.sync_con_metadata() ->
+list[ArchivoSincronizado]` + atributo `.staging_dir: Path` — p.ej.
+`src.theory.drive_sync.DriveSyncTeoria`, pero tipado aquí como `Any`
+deliberadamente para no forzar el import de `src.theory.drive_sync`, ni de sus
+dependencias de `google-api-python-client`, en callers/tests que solo usan el
+modo solo-local). `ArchivoSincronizado` sí se importa desde
+`src.utils.drive_sync` — es un `dataclass` puro, sin esas dependencias.
+`run_pipeline` llama **solo** a `.sync_con_metadata()`, nunca a `.sync()`
+(comparten estado de idempotencia; ver `src/theory/SPEC.md` §Captura Bronze).
 
 - `drive_sync=None` (por defecto): modo solo-local, comportamiento **bit a
   bit idéntico** al de antes de esta tarea — no se toca nada de Drive.
@@ -116,6 +120,44 @@ todavía una fuente de metadatos real (Drive real diferido, P18):
 - `licencia`: `LICENCIA_POR_DEFECTO` de `format_normalizer`
   (`"personal_only"`, correcto por defecto para `externo*`).
 
+## Etapa 0.5 opcional: captura Bronze (`document_store`, task 59, P25)
+
+Ver `src/theory/SPEC.md` §"Captura Bronze — todo lo que entra se guarda antes
+de tocarlo (P25, task 59)" para el contrato completo. Resumen: `run_pipeline`
+recibe un parámetro `document_store` inyectable (duck-typed:
+`.capturar(ruta, capa, flujo, drive_file_id=, modified_time=, nombre=,
+mime_type=, extra=)` — p.ej. `src.utils.document_store.DocumentStore`).
+`document_store=None` (por defecto): ni una llamada nueva, comportamiento bit
+a bit idéntico al de antes de esta tarea.
+
+Con `document_store` presente, la captura ocurre en dos puntos, **antes** de
+que el fichero entre a `_procesar_fichero`:
+
+- **Modo Drive** (dentro del bloque `if drive_sync is not None:`): cada
+  `ArchivoSincronizado` que devuelve `sync_con_metadata()` **en este run** se
+  captura con `drive_file_id`/`modified_time` de Drive, `nombre` =
+  `archivo.name` (nombre lógico de Drive) y `mime_type` = `archivo.mime_salida`
+  (el MIME real del contenido descargado, NO `archivo.mime_type`, que es el de
+  ORIGEN en Drive). `extra.ruta_relativa` es siempre `None` (la carpeta de
+  Drive es plana).
+- **Modo legacy**, después de resolver `elegibles`: cada `path` pendiente que
+  NO esté bajo `drive_sync.staging_dir` (un fichero del staging ya se capturó,
+  o se capturará, en modo Drive — nunca los dos) se captura con
+  `drive_file_id=modified_time=None` y `extra.ruta_relativa` = la ruta de
+  `path` relativa a la carpeta de `carpetas` que lo produjo (de ahí que el
+  escaneo recolecte pares `(carpeta, path)` en vez de una lista plana).
+
+En ambos modos, `extra.tipo_fuente` se deriva de la extensión exactamente
+igual que `_PARSERS_POR_EXTENSION` (`_tipo_fuente_por_extension`) y
+`extra.licencia` es siempre `LICENCIA_POR_DEFECTO`.
+
+**Un fallo de `document_store.capturar()` no tumba el batch entero**: se
+registra en `fallidos` (mismo estilo que un fallo de `_procesar_fichero`, ver
+`ResultadoFichero`) y ese fichero en concreto se excluye de `elegibles` para
+esta corrida — no se procesa, no se marca en `processed_files.json`, así que
+el siguiente run reintenta su captura desde cero (misma idempotencia que ya
+documenta este módulo para cualquier otro fallo a mitad de cadena).
+
 ## Ficheros sin Parser conocido (p.ej. `.gitkeep`)
 
 Un fichero cuya extensión no está en `_PARSERS_POR_EXTENSION` se reporta en
@@ -128,6 +170,7 @@ marca igualmente como "visto" en `processed_files.json` (con el hash que
 from __future__ import annotations
 
 import json
+import mimetypes
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -145,6 +188,7 @@ from src.theory.parsers.docx_parser import parse_docx
 from src.theory.parsers.epub_parser import parse_epub
 from src.theory.parsers.pdf_parser import parse_pdf
 from src.theory.parsers.whisperx_parser import parse_whisperx_transcript
+from src.utils.drive_sync import ArchivoSincronizado
 
 CARPETA_BOOKS_POR_DEFECTO = Path("data/raw/books")
 CARPETA_NOTES_POR_DEFECTO = Path("data/raw/notes")
@@ -162,6 +206,17 @@ _PARSERS_POR_EXTENSION: dict[str, tuple[Callable[[Path], object], str]] = {
 }
 """Extensión -> (función de parseo, `tipo_fuente` inferido). Ver docstring
 del módulo, §Fricción resuelta: metadatos de documento."""
+
+
+def _tipo_fuente_por_extension(path: Path) -> str:
+    """Deriva `tipo_fuente` de la extensión de `path`, EXACTAMENTE igual que
+    `_PARSERS_POR_EXTENSION` (`.txt` -> `"transcripcion_curso"`, resto ->
+    `"teoria"`) — misma señal que usará el Parser después, nunca se
+    desincroniza (ver `src/theory/SPEC.md` §"bronze.teoria_documentos").
+    Usada solo por la captura Bronze (etapa 0.5, task 59): `_procesar_fichero`
+    sigue derivándolo tal cual del diccionario, sin pasar por aquí."""
+    entrada = _PARSERS_POR_EXTENSION.get(path.suffix.lower())
+    return entrada[1] if entrada is not None else "teoria"
 
 
 @dataclass
@@ -265,6 +320,7 @@ def run_pipeline(
     traductor: Optional[Traductor] = None,
     version: Optional[int] = None,
     drive_sync: Optional[Any] = None,
+    document_store: Optional[Any] = None,
 ) -> ResultadoPipeline:
     """Ejecuta un run completo del Flujo A sobre los ficheros nuevos/modificados.
 
@@ -280,24 +336,66 @@ def run_pipeline(
       un traductor sin red.
     - `version`: se pasa tal cual a `generar_version` (por defecto, la
       siguiente versión libre).
-    - `drive_sync`: etapa 0 opcional (task 45, P23, ver docstring del módulo
-      §"Etapa 0 opcional"). `None` (por defecto) -> modo solo-local, ni una
-      línea de comportamiento distinta de antes de esta tarea. Un objeto con
-      `.sync() -> list[Path]` + `.staging_dir: Path` (p.ej.
-      `src.theory.drive_sync.DriveSyncTeoria`) -> se invoca `.sync()` una
-      única vez ANTES de resolver `carpetas`/instanciar `DriveMonitor`, y
-      `carpetas` se resuelve según la tabla de la SPEC (ver módulo).
+    - `drive_sync`: etapa 0 opcional (task 45, P23; contrato ampliado task 59,
+      ver docstring del módulo §"Etapa 0 opcional"). `None` (por defecto) ->
+      modo solo-local, ni una línea de comportamiento distinta de antes de
+      esta tarea. Un objeto con `.sync_con_metadata() ->
+      list[ArchivoSincronizado]` + `.staging_dir: Path` (p.ej.
+      `src.theory.drive_sync.DriveSyncTeoria`) -> se invoca
+      `.sync_con_metadata()` una única vez ANTES de resolver
+      `carpetas`/instanciar `DriveMonitor`, y `carpetas` se resuelve según la
+      tabla de la SPEC (ver módulo).
+    - `document_store`: etapa 0.5 opcional (task 59, P25, ver docstring del
+      módulo §"Etapa 0.5 opcional"). `None` (por defecto) -> cero llamadas
+      nuevas, comportamiento bit a bit idéntico al de antes de esta tarea. Un
+      objeto con `.capturar(...)` (p.ej. `src.utils.document_store.DocumentStore`)
+      -> captura Bronze de cada fichero (Drive o legacy) antes de que entre a
+      `_procesar_fichero`.
 
     Marca cada fichero en `ruta_estado` SOLO tras completar con éxito toda
     la cadena hasta `generar_version` (ver docstring del módulo, §Fricción
     resuelta: DriveMonitor). Si no hay ningún fichero pendiente, no genera
     ninguna versión nueva (`version_dir=None`, listas vacías).
     """
+    fallidos: list[ResultadoFichero] = []
+    # Paths cuya captura Bronze falló (Drive o legacy): se excluyen de esta
+    # corrida (ver docstring del módulo, §Etapa 0.5 opcional) — no se marcan
+    # en `ruta_estado`, así que el siguiente run los reintenta desde cero.
+    rutas_captura_fallida: set[Path] = set()
+
     if drive_sync is not None:
         # Etapa 0: sincroniza Drive -> staging ANTES de que DriveMonitor
         # escanee nada (si no, no habría nada que escanear todavía). Este
         # módulo no reimplementa DriveSync/DriveSyncTeoria: solo la llama.
-        drive_sync.sync()
+        archivos: list[ArchivoSincronizado] = drive_sync.sync_con_metadata()
+
+        if document_store is not None:
+            # Etapa 0.5, modo Drive: captura cada fichero sincronizado EN ESTE
+            # RUN antes de que nada más lo toque (ver docstring del módulo).
+            for archivo in archivos:
+                try:
+                    document_store.capturar(
+                        ruta=archivo.path,
+                        capa="bronze",
+                        flujo="teoria",
+                        drive_file_id=archivo.file_id,
+                        modified_time=archivo.modified_time,
+                        nombre=archivo.name,
+                        mime_type=archivo.mime_salida,
+                        extra={
+                            "tipo_fuente": _tipo_fuente_por_extension(archivo.path),
+                            "licencia": LICENCIA_POR_DEFECTO,
+                            "ruta_relativa": None,
+                        },
+                    )
+                except Exception as exc:  # noqa: BLE001 — no tumba el batch, ver docstring
+                    fallidos.append(
+                        ResultadoFichero(
+                            path=archivo.path,
+                            error=f"captura Bronze (Drive) fallida: {exc}",
+                        )
+                    )
+                    rutas_captura_fallida.add(archivo.path)
 
     if carpetas is not None:
         carpetas = list(carpetas)
@@ -313,13 +411,21 @@ def run_pipeline(
 
     estado_comprometido = _cargar_estado(ruta_estado)
 
-    pendientes: list[Path] = []
+    # (carpeta, path): se recolecta el par, no solo `path`, porque la captura
+    # legacy (abajo) necesita saber de qué carpeta de `carpetas` salió cada
+    # pendiente para calcular su `ruta_relativa` (ver docstring del módulo,
+    # §Etapa 0.5 opcional) — `pendientes` sigue exponiendo solo los paths al
+    # resto del código, sin cambiar su forma.
+    pendientes_por_carpeta: list[tuple[Path, Path]] = []
     for carpeta in carpetas:
         carpeta = Path(carpeta)
         if not carpeta.exists():
             continue
         monitor = DriveMonitor(folder=carpeta, state_path=ruta_estado)
-        pendientes.extend(monitor.scan())
+        for path in monitor.scan():
+            pendientes_por_carpeta.append((carpeta, path))
+
+    pendientes: list[Path] = [path for _, path in pendientes_por_carpeta]
 
     estado_fresco = _cargar_estado(ruta_estado)
     # Revierte la escritura prematura de DriveMonitor.scan() (ver docstring
@@ -328,17 +434,60 @@ def run_pipeline(
     _guardar_estado(ruta_estado, estado_comprometido)
 
     elegibles: list[Path] = []
+    elegibles_carpeta_origen: dict[Path, Path] = {}
     ignorados: list[Path] = []
-    for path in pendientes:
+    for carpeta, path in pendientes_por_carpeta:
         if path.suffix.lower() in _PARSERS_POR_EXTENSION:
             elegibles.append(path)
+            elegibles_carpeta_origen[path] = carpeta
         else:
             ignorados.append(path)
             if path.name in estado_fresco:
                 estado_comprometido[path.name] = estado_fresco[path.name]
 
+    if document_store is not None:
+        # Etapa 0.5, modo legacy: captura cada pendiente elegible que NO esté
+        # bajo el staging de Drive (ese ya se capturó, o se capturará, en modo
+        # Drive arriba — un fichero del staging nunca se captura dos veces,
+        # ver docstring del módulo). Si `drive_sync` es `None`, la condición
+        # es trivialmente cierta para todos.
+        for path in elegibles:
+            carpeta_origen = elegibles_carpeta_origen[path]
+            if drive_sync is not None and carpeta_origen == drive_sync.staging_dir:
+                continue
+
+            try:
+                ruta_relativa = str(path.relative_to(carpeta_origen))
+            except ValueError:
+                ruta_relativa = path.name
+
+            try:
+                document_store.capturar(
+                    ruta=path,
+                    capa="bronze",
+                    flujo="teoria",
+                    drive_file_id=None,
+                    modified_time=None,
+                    nombre=path.name,
+                    mime_type=mimetypes.guess_type(path.name)[0],
+                    extra={
+                        "tipo_fuente": _tipo_fuente_por_extension(path),
+                        "licencia": LICENCIA_POR_DEFECTO,
+                        "ruta_relativa": ruta_relativa,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 — no tumba el batch, ver docstring
+                fallidos.append(
+                    ResultadoFichero(
+                        path=path, error=f"captura Bronze (legacy) fallida: {exc}"
+                    )
+                )
+                rutas_captura_fallida.add(path)
+
+    if rutas_captura_fallida:
+        elegibles = [path for path in elegibles if path not in rutas_captura_fallida]
+
     documentos_listos: list[tuple[Path, DocumentoEntrada]] = []
-    fallidos: list[ResultadoFichero] = []
 
     for path in elegibles:
         try:
