@@ -23,6 +23,7 @@
 7. [Despliegues posteriores (automático vía CI)](#7-despliegues-posteriores-automático-vía-ci)
 8. [Dónde mirar logs](#8-dónde-mirar-logs)
 9. [Solución de problemas comunes](#9-solución-de-problemas-comunes)
+10. [Migración a 3 schemas (bronze/silver/gold) — runbook de cutover](#10-migración-a-3-schemas-bronzesilvergold--runbook-de-cutover)
 
 ---
 
@@ -443,6 +444,195 @@ Si el log está vacío o truncado, prueba aumentar el tail o buscar líneas de P
 ```bash
 docker compose logs webhook | grep -i error
 ```
+
+---
+
+## 10. Migración a 3 schemas (bronze/silver/gold) — runbook de cutover
+
+**Referencia:** Task 55, decisión P25 (`docs/specs/00-overview.md` §P25), especificación de schema en `src/jokes/SPEC.md` §"Acceso por schema" y migración SQL en `src/jokes/migration_p25_schemas.sql`.
+
+Este runbook consolida el orden exacto de pasos para ejecutar el cutover de la base de datos de Supabase del proyecto real desde un esquema único `public` a tres esquemas: `bronze` (crudo), `silver` (procesado), `gold` (estructurado). **No ejecutar nada desde este runbook — es solo documentación del orden operativo y verificación. La ejecución real es task 56.** Todo está ya diseñado en las tareas previas (53 y 54).
+
+### Paso 1: Verificar que el código está desplegado en modo schema-aware (task 54)
+
+La rama `main` debe tener mergeado el código de la task 54, que añade soporte para `.schema(...)` a `src/jokes/supabase_store.py` y `src/theory/teoria_store.py` mediante la variable de entorno `SUPABASE_SCHEMA_MODE`.
+
+**Mientras esta variable esté ausente o fijada a `"public"`, el comportamiento es idéntico al anterior** — cero riesgo de cambio observable. El deploy automático (§7) que corra tras el merge de la task 54 ya habrá actualizado el código en producción si está activo; si no, fuerza un redeploy:
+
+```bash
+cd ~/corpusRAG/deploy
+git pull
+docker compose up -d --build
+```
+
+### Paso 2: Aplicar el SQL de cutover contra Supabase real
+
+En el dashboard de Supabase (proyecto → **SQL Editor** → **New query**), copia y ejecuta **completo** el contenido de `src/jokes/migration_p25_schemas.sql`:
+
+```bash
+cat src/jokes/migration_p25_schemas.sql
+```
+
+Luego pega todo en el SQL Editor y ejecuta. Este SQL:
+- Crea los tres schemas (`bronze`, `silver`, `gold`).
+- Mueve las 8 tablas existentes de `public` a sus schemas finales con `ALTER TABLE ... SET SCHEMA ...` + `RENAME TO` (operación pura de metadata, cero copias de datos).
+- Crea las 4 tablas nuevas de documentos (`bronze.teoria_documentos`, `silver.teoria_documentos`, `bronze.historico_documentos`, `silver.historico_documentos`).
+- Aplica `GRANT` a `service_role` para acceso desde PostgREST.
+- Ejecuta `notify pgrst, 'reload schema'` para forzar que PostgREST recargue el caché.
+
+**No copia ni una fila — es solo reordenamiento de metadata.** Remite a `src/jokes/migration_p25_schemas.sql` para el detalle de cada paso.
+
+### Paso 3: Verificación de conteos antes/después
+
+Ejecuta los `SELECT count(*)` como comentarios al final de `src/jokes/migration_p25_schemas.sql` (líneas ~239-259) en **dos pasadas**:
+
+**Antes del cutover** (contra `public.*` con la base de datos sin tocar):
+```sql
+select count(*) from public.chistes;
+select count(*) from public.chistes_revisiones;
+select count(*) from public.temas;
+select count(*) from public.tecnicas;
+select count(*) from public.fuentes;
+select count(*) from public.candidatos_taxonomia;
+select count(*) from public.chistes_telegram_bronze;
+select count(*) from public.teoria_chunks;
+```
+
+Anota cada fila.
+
+**Después del cutover** (ejecuta el SQL del paso 2 primero, luego estos):
+```sql
+select count(*) from silver.chistes;
+select count(*) from silver.chistes_revisiones;
+select count(*) from silver.temas;
+select count(*) from silver.tecnicas;
+select count(*) from silver.fuentes;
+select count(*) from silver.candidatos_taxonomia;
+select count(*) from bronze.chistes_telegram;
+select count(*) from gold.teoria_chunks;
+```
+
+**Los números deben ser IDÉNTICOS fila a fila.** Si alguno difiere, detente — no continúes hasta que coincidan exactamente.
+
+### Paso 4: Crear los 4 buckets privados en Supabase Storage
+
+En el dashboard de Supabase (proyecto → **Storage** → **New bucket**), crea estos 4 buckets, marcando cada uno como **Private** (no público):
+
+1. `bronze-teoria` — crudo de libros, apuntes, transcripciones WhisperX (Flujo A).
+2. `silver-teoria` — limpio, traducido y normalizado (Flujo A).
+3. `bronze-historico` — documentos originales con color de fuente (Flujo C).
+4. `silver-historico` — marcados con `[REMATE]`/`[CHISTOIDE]` (Flujo C).
+
+**Razón:** separar por capa (regenerable vs. original) y por flujo mantiene la diferencia expresada en la estructura de datos y permite gestión diferenciada de permisos (`personal_only` incluida en el material). Ver `docs/specs/00-overview.md` líneas ~509-519.
+
+### Paso 5: Exponer los schemas y aplicar GRANTs manualmente en el dashboard
+
+**Este paso NO se puede hacer vía SQL** — es configuración de PostgREST:
+
+1. En el dashboard → **Settings** → **API** → **Exposed schemas**.
+2. Añade `bronze`, `silver` y `gold` a la lista (si no están ya).
+3. Guarda.
+
+Los `GRANT` ya están ejecutados por el SQL del paso 2, pero sin esta exposición de schemas en el dashboard, PostgREST rechazará cualquier `.schema("bronze")` con un error de autorización.
+
+### Paso 6: Flip de la variable `SUPABASE_SCHEMA_MODE` en el `.env` de producción
+
+Cambia en `~/corpusRAG/.env`:
+
+```bash
+# De (ausente o "public"):
+# SUPABASE_SCHEMA_MODE=public
+
+# A:
+SUPABASE_SCHEMA_MODE=p25
+```
+
+El valor exacto `"p25"` activa el mapeo fijado en `_SCHEMA_TABLAS` de `src/jokes/supabase_store.py` y `src/theory/teoria_store.py`. Cualquier valor distinto de `"public"` resuelve tablas con `.schema(...)`.
+
+### Paso 7: Redeploy del webhook para recoger el nuevo `.env`
+
+El webhook lee `.env` al arrancar. Fuerza una recreación del contenedor:
+
+```bash
+cd ~/corpusRAG/deploy
+docker compose up -d --force-recreate webhook
+docker compose ps
+```
+
+Espera a que `webhook` esté en estado `Up` (no `Restarting`).
+
+### Paso 8: Verificación post-cutover
+
+**Verificar que el webhook sigue funcionando:**
+
+Obtén un nuevo mensaje de Telegram del bot (envía un mensaje desde un chat autorizado). Confirma en los logs:
+
+```bash
+cd ~/corpusRAG/deploy
+docker compose logs webhook -f
+```
+
+Busca líneas con el `message_id` o `chat_id` — debe insertar en `bronze.chistes_telegram` (ya no `public.chistes_telegram_bronze`).
+
+**Verificar con tests:**
+
+```bash
+cd ~/corpusRAG
+# Fuerza que los tests usen el nuevo schema mode
+export SUPABASE_SCHEMA_MODE=p25
+pytest tests/integration/test_supabase_store_live.py -v
+```
+
+(Si no tienes credenciales de Supabase real en el entorno de test, salta este paso — es solo para verificación en desarrollo contra una copia real.)
+
+### Paso 9: Rollback (si es necesario)
+
+Si algo falla en los pasos posteriores y necesitas revertir:
+
+**SQL de vuelta atrás** (ejecuta en el SQL Editor, en este orden exacto — INVERSO al del cutover):
+
+```sql
+-- Revertir el orden exacto de movimiento de tablas (inverso)
+alter table gold.teoria_chunks set schema public;
+
+alter table bronze.chistes_telegram rename to chistes_telegram_bronze;
+alter table bronze.chistes_telegram_bronze set schema public;
+
+alter table silver.chistes_revisiones set schema public;
+alter table silver.chistes set schema public;
+alter table silver.candidatos_taxonomia set schema public;
+alter table silver.fuentes set schema public;
+alter table silver.tecnicas set schema public;
+alter table silver.temas set schema public;
+
+-- Las 4 tablas nuevas (teoria_documentos, historico_documentos) quedan huérfanas,
+-- pero no hay datos que recuperar aún (se crean vacías en el cutover).
+-- Opcionalmente, si quieres limpiar completamente:
+-- drop table if exists bronze.teoria_documentos;
+-- drop table if exists silver.teoria_documentos;
+-- drop table if exists bronze.historico_documentos;
+-- drop table if exists silver.historico_documentos;
+
+-- Refresco de caché PostgREST
+notify pgrst, 'reload schema';
+```
+
+**Revertir el `.env`:**
+
+```bash
+# Edita .env y cambia:
+SUPABASE_SCHEMA_MODE=public
+# O simplemente comenta/borra la línea si no estaba antes del cutover
+```
+
+**Redeploy del webhook:**
+
+```bash
+cd ~/corpusRAG/deploy
+docker compose up -d --force-recreate webhook
+```
+
+**Nota sobre las tablas nuevas:** como se crean con `CREATE TABLE IF NOT EXISTS` sin datos durante el cutover, no hay que recuperar nada de ellas. Si el rollback es completo, quedan vacías en sus schemas nuevos — no interfieren con la operación, pero si quieres limpiar también, los `DROP TABLE` están comentados arriba (opcionalmente a discreción de quien ejecute, no es un paso obligatorio).
 
 ---
 
