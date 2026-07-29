@@ -8,8 +8,18 @@ conecta:
 
     [DriveSync (etapa 0, opcional)] -> DriveMonitor -> Parser
       -> SubtypeDetector -> Cleaner -> LanguageDetector
-      -> LanguageNormalizer -> QualityScorer -> FormatNormalizer
-      -> /data/processed/v{N}/
+      -> LanguageNormalizer -> [DocumentStore Bronze/Silver, opcional]
+
+**Task 63, P25 — retirada de `/data/processed/v{N}/`**: este módulo YA NO
+invoca `format_normalizer.generar_version`. El Flujo A no vuelve a escribir
+corpus en disco — la cadena real y completa es
+`Drive/legacy -> Bronze (Supabase) -> Silver (Supabase) -> Gold (ingest_teoria)`.
+`generar_version` sigue existiendo en `format_normalizer.py` (con
+`manifest.json`/`stats.json` y sus propios tests), sin llamador en el flujo —
+no se borra, solo deja de invocarse desde aquí (ver
+`src/theory/SPEC.md` §"Retirada de `/data/processed/v{N}/` (task 63)").
+`render_document` sí conserva llamador (`_persistir_silver`, produce el `.md`
+de Silver, task 60).
 
 ## Etapa 0 opcional: `drive_sync` (task 45, P23; contrato ampliado task 59, P25)
 
@@ -40,13 +50,14 @@ modo solo-local). `ArchivoSincronizado` sí se importa desde
   si `drive_sync` está presente y su `staging_dir` no está ya en la lista, se
   añade. El resto de la cadena (`DriveMonitor` en adelante) no cambia.
 
-`QualityScorer` (`src/utils/quality_scorer.score_quality`) no se invoca aquí
-como paso explícito: `format_normalizer.generar_version` YA lo invoca
-internamente por fragmento para construir `stats.json` (ver su docstring,
-§"esquema de manifest.json / stats.json", task 11/10). Repetirlo en este
-módulo sería puntuar el mismo texto dos veces sin ganar nada — la cadena
-real, tal y como ya la ejecuta `generar_version`, sigue siendo
-`... -> LanguageNormalizer -> QualityScorer -> FormatNormalizer -> v{N}/`.
+`QualityScorer` (`src/utils/quality_scorer.score_quality`) se invoca
+explícitamente en `_persistir_silver` (Etapa 1 abajo) para calcular el
+`quality_score` agregado de la fila Silver — hasta la task 63 lo invocaba
+`format_normalizer.generar_version` internamente para `stats.json`; ahora que
+esa función ya no tiene llamador en este módulo, `_persistir_silver` reutiliza
+la MISMA fórmula (`quality_score_medio` = media de `score_quality(f.texto)`
+sobre los fragmentos del documento) directamente, sin pasar por
+`generar_version`.
 
 No es la única función pública, expone `run_pipeline` como entrada
 principal (task 23, `scripts/run_pipeline.py`, la invocará). No toca
@@ -60,7 +71,7 @@ llamarse tal cual ya están (scope de esta tarea).
 hash MD5 de cada fichero nuevo/modificado en `processed_files.json` ANTES de
 devolver la lista de pendientes — es idempotencia de DETECCIÓN ("¿ha
 cambiado este fichero desde la última vez que lo vi?"), no de FINALIZACIÓN
-("¿completó este fichero toda la cadena hasta `generar_version`?"). Son dos
+("¿completó este fichero toda la cadena hasta el final?"). Son dos
 contratos distintos que esta tarea exige reconciliar sin tocar
 `drive_monitor.py` (fuera de scope, ver `CLAUDE.md`/instrucciones de la
 tarea).
@@ -80,25 +91,22 @@ documentado y testeado en `test_drive_monitor.py`, no una API privada):
    ficheros realmente terminados en todo momento salvo por la ventana
    brevísima del propio `scan()`.
 4. Cada fichero pendiente se procesa de forma INDEPENDIENTE (try/except): si
-   falla en cualquier etapa antes de `generar_version`, no se añade a
-   `estado_comprometido` — sigue pendiente para el siguiente run. Si tiene
-   éxito, su fragmento pasa a la lista que se vuelca a `generar_version`.
-5. `generar_version` se llama UNA VEZ con todos los documentos que superaron
-   la cadena en este run (un run = un intento de versión `v{N}`, coherente
-   con "Flujo batch" de `src/theory/SPEC.md`). Si `generar_version` falla
-   (p.ej. error de disco), NINGÚN fichero de este batch se marca como
-   procesado — todos vuelven a estar pendientes en el siguiente run (la
-   propia inmutabilidad de `generar_version` hace que una versión no
-   finalizada se pueda reintentar sin corromper nada, ver su docstring).
-   Si tiene éxito, solo ENTONCES se añaden los hashes (ya calculados en el
-   paso 2, sin recalcular) de los ficheros de este batch a
-   `estado_comprometido`, y se escribe a disco — el commit final.
+   falla en `_procesar_fichero`, no se añade a `estado_comprometido` — sigue
+   pendiente para el siguiente run, y no afecta a los demás ficheros del
+   batch. Si tiene éxito, se marca en `estado_comprometido` en el acto (ya no
+   hay una fase batch posterior — `generar_version`, task 63 — que pudiera
+   tumbar el grupo entero: cada fichero es su propia unidad de éxito/fallo
+   desde que termina `_procesar_fichero`).
+5. Con `document_store` presente, la captura Silver (Etapa 1 abajo) ocurre
+   inmediatamente después, para ESE fichero — un fallo ahí no deshace su
+   marcado (ver §Etapa 1).
+6. Al final del run, `estado_comprometido` (con los hashes ya calculados en
+   el paso 2, sin recalcular) se escribe a disco — el commit final.
 
 Con esto, "reanudación" es literal: un fichero solo desaparece de
-`DriveMonitor.scan()` en el siguiente run si completó la cadena entera con
-éxito hasta `generar_version`; si no, se reintenta desde el principio de su
-propia cadena (no hay reanudación fina intra-fichero, igual que
-`format_normalizer` documenta que tampoco la hay intra-versión).
+`DriveMonitor.scan()` en el siguiente run si completó su propia cadena con
+éxito; si no, se reintenta desde el principio de su propia cadena (no hay
+reanudación fina intra-fichero).
 
 ## Fricción resuelta: metadatos de documento que ningún Parser produce
 
@@ -165,16 +173,16 @@ Ver `src/theory/SPEC.md` §"`silver.teoria_documentos` — qué añade teoría v
 qué" para el contrato completo y su justificación. Resumen: con
 `document_store` presente (mismo interruptor que la captura Bronze — no existe
 configuración que escriba Silver sin Bronze), cada documento que sobrevive a
-`generar_version` con éxito se vuelca TAMBIÉN a `silver.teoria_documentos`
-(bucket `silver-teoria`), en el mismo bucle que ya marca `procesados.append(path)`
-— es decir, después de que `generar_version` haya tenido éxito para todo el
-batch, nunca antes: si `generar_version` falla, ningún fichero de ese batch
-cuenta como procesado y tampoco se escribe su Silver (el siguiente run los
-reintenta juntos, misma inmutabilidad que ya rige el resto del módulo).
+`_procesar_fichero` con éxito se vuelca TAMBIÉN a `silver.teoria_documentos`
+(bucket `silver-teoria`), en el mismo bucle unificado que marca
+`procesados.append(path)` (task 63: ya no hay una fase batch de
+`generar_version` que agrupe el run entero — cada fichero se marca y persiste
+su Silver de forma INDEPENDIENTE en cuanto termina su propia
+`_procesar_fichero`, ver §Fricción resuelta: DriveMonitor arriba).
 
-- El `.md` lo produce `format_normalizer.render_document(...)` — mismo
-  contenido que ya escribe `generar_version` en `v{N}/documents/*.txt` para
-  ese documento, solo cambia la extensión y el destino (ver SPEC).
+- El `.md` lo produce `format_normalizer.render_document(...)` (task 60; sigue
+  siendo el único llamador de `render_document` en este módulo tras la
+  retirada de `generar_version`, task 63, ver docstring del módulo).
 - La fila Silver se escribe SIEMPRE en modo legacy
   (`drive_file_id=modified_time=None`): su clave de idempotencia es el
   `hash_md5` del propio `.md`, nunca el par de Drive del original (decisión ya
@@ -190,11 +198,12 @@ reintenta juntos, misma inmutabilidad que ya rige el resto del módulo).
   agregación a un solo valor es una simplificación deliberada — el primer
   fragmento es el criterio más barato y estable (no depende de recorrer todo
   el documento ni de una heurística de mayoría). `traducido` es `True` si
-  CUALQUIER fragmento fue traducido. `quality_score` es la MISMA agregación
-  que `generar_version` calcula para `stats.json`
+  CUALQUIER fragmento fue traducido. `quality_score` es la misma fórmula que
+  `format_normalizer.generar_version` usa para `stats.json`
   (`quality_score_medio` = media de `score_quality(f.texto)` sobre los
-  fragmentos del documento) — no se puntúa dos veces con una fórmula distinta,
-  solo se reutiliza el mismo cálculo.
+  fragmentos del documento), calculada aquí directamente (task 63:
+  `generar_version` ya no se invoca desde este módulo, así que
+  `_persistir_silver` reutiliza la fórmula, no la llamada).
 - `document_store.capturar()` exige un `Path` real en disco (lee
   `ruta.read_bytes()`); el `.md` renderizado es un string en memoria, así que
   se escribe a un fichero temporal (`tempfile.TemporaryDirectory()`) que se
@@ -204,7 +213,7 @@ reintenta juntos, misma inmutabilidad que ya rige el resto del módulo).
 - **Caso raro: `path` sin captura Bronze en este mismo run** (fichero ya
   presente en `drive_sync.staging_dir` de una descarga previa que
   `sync_con_metadata()` no vuelve a reportar, pero cuya cadena no había
-  llegado a `generar_version` en el run que lo dejó ahí — ver
+  terminado en el run que lo dejó ahí — ver
   `test_fichero_bajo_staging_dir_no_se_captura_en_modo_legacy`): `_persistir_silver`
   recalcula el `hash_md5` directamente del fichero (mismo algoritmo que
   `document_store`, resultado idéntico) en vez de fallar por no encontrar
@@ -212,8 +221,8 @@ reintenta juntos, misma inmutabilidad que ya rige el resto del módulo).
   recuperable sin volver a consultar Drive). No bloquea la persistencia
   Silver por una limitación de tracking en memoria de un solo proceso.
 - **Un fallo de la captura Silver NO deshace el trabajo ya hecho para ese
-  fichero** (Bronze ya se capturó, `v{N}` ya se generó con éxito) y por eso
-  NO se excluye de `procesados` ni de `ruta_estado`: se registra en
+  fichero** (Bronze ya se capturó, `_procesar_fichero` ya terminó con éxito) y
+  por eso NO se excluye de `procesados` ni de `ruta_estado`: se registra en
   `fallidos` (mismo estilo que cualquier otro fallo del módulo,
   `"captura Silver fallida: {exc}"`) pero el fichero de origen no se
   reprocesa en el siguiente run — perder una fila Silver no debería obligar a
@@ -222,6 +231,10 @@ reintenta juntos, misma inmutabilidad que ya rige el resto del módulo).
   (ese sí excluye el fichero del batch, ver §Etapa 0.5 arriba): Bronze es la
   garantía de que el original sobrevive (`CLAUDE.md`), Silver es un derivado
   regenerable a partir de él.
+- `_persistir_silver` devuelve el `ResultadoCaptura` de su propia llamada a
+  `.capturar()` (antes no devolvía nada): `run_pipeline` lo usa para contar
+  `silver_nuevos`/`silver_existentes` según `ya_existia` (ver
+  `ResultadoPipeline`, task 63).
 
 ## Ficheros sin Parser conocido (p.ej. `.gitkeep`)
 
@@ -249,9 +262,12 @@ from src.theory.drive_monitor import DriveMonitor
 from src.theory.normalizers.format_normalizer import (
     LICENCIA_POR_DEFECTO,
     DocumentoEntrada,
-    generar_version,
     render_document,
 )
+# `generar_version` deliberadamente NO se importa desde la task 63 (P25): se
+# queda en `format_normalizer.py`, sin llamador en este módulo (ver docstring
+# arriba, §"Task 63, P25"). No se borra: sigue teniendo sus propios tests en
+# `tests/unit/theory/test_format_normalizer.py`.
 from src.theory.normalizers.language_normalizer import Traductor, normalize_language
 from src.theory.parsers.docx_parser import parse_docx
 from src.theory.parsers.epub_parser import parse_epub
@@ -260,9 +276,11 @@ from src.theory.parsers.whisperx_parser import parse_whisperx_transcript
 from src.utils.drive_sync import ArchivoSincronizado
 from src.utils.quality_scorer import score_quality
 
+# `DIRECTORIO_PROCESADO_POR_DEFECTO` (antes `data/processed/`) se retira en la
+# task 63: `run_pipeline` ya no escribe ningún `v{N}/`, así que no hay
+# directorio por defecto que resolver (ver docstring del módulo).
 CARPETA_BOOKS_POR_DEFECTO = Path("data/raw/books")
 CARPETA_NOTES_POR_DEFECTO = Path("data/raw/notes")
-DIRECTORIO_PROCESADO_POR_DEFECTO = Path("data/processed")
 RUTA_ESTADO_POR_DEFECTO = Path("data/state/processed_files.json")
 """Rutas por defecto, relativas al directorio de trabajo (mismo criterio que
 `scripts/validate_corpus.py`: se asume invocación desde la raíz del repo).
@@ -301,27 +319,50 @@ class ResultadoFichero:
 class ResultadoPipeline:
     """Resultado agregado de una llamada a `run_pipeline`.
 
-    - `version_dir`: `Path` de la `v{N}/` generada, o `None` si no había
-      ningún documento listo para volcar (nada pendiente, o todo falló antes
-      de `generar_version`) o si `generar_version` en sí falló.
-    - `procesados`: ficheros que completaron la cadena entera con éxito y
+    - `version_dir`: **DEPRECATED (task 63, P25)**. Ya no es un entregable —
+      `run_pipeline` no vuelve a invocar `generar_version`, así que este
+      campo se mantiene SIEMPRE en `None`, nunca se le asigna ningún otro
+      valor. Se conserva únicamente por compatibilidad del contrato de CLI
+      (`scripts/run_pipeline.py`: la clave `"version_dir"` del resumen JSON
+      es un contrato externo consumido por un proyecto RAG externo — quitar
+      la clave rompería a ese consumidor; dejarla en `null` es justo lo que
+      ya significa "este run no produjo versión", ver `src/theory/SPEC.md`
+      §"Retirada de `/data/processed/v{N}/`"). Lo realmente entregado ahora
+      se cuenta en `bronze_*`/`silver_*` abajo.
+    - `procesados`: ficheros cuyo `_procesar_fichero` terminó con éxito y
       quedaron marcados en `processed_files.json`. Un fallo de la captura
       Silver (§Etapa 1, task 60) de un fichero YA presente aquí no lo retira
-      de esta lista (Bronze y `v{N}` ya se completaron para él, ver docstring
-      del módulo) — sí aparece, además, en `fallidos`.
-    - `fallidos`: ficheros que fallaron en alguna etapa (o el propio
-      `generar_version`, representado con `path=Path("<generar_version>")`)
-      — NO quedan marcados, se reintentan en el siguiente run. Excepción: un
-      fallo de captura Silver SÍ deja el fichero marcado/procesado (ver
-      `procesados` arriba) — solo la fila Silver se reintentaría en un futuro
-      mecanismo de backfill, no toda la cadena.
+      de esta lista (Bronze ya se completó para él, ver docstring del
+      módulo) — sí aparece, además, en `fallidos`.
+    - `fallidos`: ficheros que fallaron en `_procesar_fichero`, en su captura
+      Bronze, o en su captura Silver — NO quedan marcados en el primer caso
+      (se reintentan en el siguiente run); un fallo de captura Silver SÍ deja
+      el fichero marcado/procesado (ver `procesados` arriba) — solo la fila
+      Silver se reintentaría en un futuro mecanismo de backfill, no toda la
+      cadena.
     - `ignorados`: ficheros sin Parser conocido (ver docstring del módulo).
+    - `bronze_activo`/`silver_activo`: `True` si `document_store is not None`
+      en esta llamada (mismo interruptor para ambas capas, ver docstring del
+      módulo §Etapa 0.5/§Etapa 1) — cuando es `False`, los contadores de esa
+      capa se quedan a 0 y eso ya comunica sin ambigüedad "capa desactivada"
+      frente a "activa pero sin nada nuevo que capturar en este run".
+    - `bronze_nuevos`/`bronze_existentes`: filas Bronze escritas (`insert`
+      nuevo) vs. ya existentes (`ResultadoCaptura.ya_existia=True`) en esta
+      corrida, sumando las dos capturas Bronze (Drive + legacy).
+    - `silver_nuevos`/`silver_existentes`: igual que arriba, para la captura
+      Silver de `_persistir_silver` (solo se incrementan si no lanzó).
     """
 
     version_dir: Optional[Path] = None
     procesados: list[Path] = field(default_factory=list)
     fallidos: list[ResultadoFichero] = field(default_factory=list)
     ignorados: list[Path] = field(default_factory=list)
+    bronze_activo: bool = False
+    bronze_nuevos: int = 0
+    bronze_existentes: int = 0
+    silver_activo: bool = False
+    silver_nuevos: int = 0
+    silver_existentes: int = 0
 
     @property
     def ok(self) -> bool:
@@ -379,8 +420,10 @@ def _fuente_desde_nombre(path: Path) -> str:
 def _procesar_fichero(path: Path, traductor: Optional[Traductor]) -> DocumentoEntrada:
     """Ejecuta la cadena completa `Parser -> SubtypeDetector -> Cleaner ->
     LanguageNormalizer` sobre UN fichero y devuelve el `DocumentoEntrada`
-    listo para `generar_version` (que internamente puntúa con QualityScorer,
-    ver docstring del módulo).
+    listo para `_persistir_silver` (que internamente puntúa con
+    QualityScorer, ver docstring del módulo). Terminar aquí con éxito ya
+    cuenta como "completo" para efectos de `processed_files.json` (task 63:
+    ya no hay una fase batch adicional aguas abajo que pueda tumbar el grupo).
 
     Deja propagar cualquier excepción de las etapas encadenadas: el llamador
     (`run_pipeline`) decide qué hacer con un fallo (no marcar el fichero
@@ -409,13 +452,18 @@ def _persistir_silver(
     path: Path,
     documento: DocumentoEntrada,
     origen_bronze: dict[Path, tuple[str, Optional[str], Optional[str]]],
-) -> None:
+) -> Any:
     """Sube el `.md` renderizado de `documento` a `silver.teoria_documentos`
     (bucket `silver-teoria`, ver docstring del módulo §"Etapa 1: persistencia
     Silver"). Siempre en modo legacy (`drive_file_id=modified_time=None`,
     decisión ya cerrada de la task 51) — el linaje hacia el Bronze de origen
     de `path` se lee de `origen_bronze` (poblado por las dos capturas Bronze
     de arriba, sin recalcular ni releer nada).
+
+    Devuelve el `ResultadoCaptura` (o doble de test) de su propia llamada a
+    `document_store.capturar()` (task 63: antes no devolvía nada) — el
+    llamador (`run_pipeline`) lo usa para contar `silver_nuevos`/
+    `silver_existentes` según `.ya_existia`.
 
     Deja propagar cualquier excepción: el llamador (`run_pipeline`) decide qué
     hacer con un fallo (no tumba el batch, no deshace `procesados` — ver
@@ -426,19 +474,18 @@ def _persistir_silver(
         hash_md5_original, drive_file_id_original, modified_time_original = entrada_bronze
     else:
         # Caso raro pero posible (ver test_fichero_bajo_staging_dir_no_se_captura_
-        # en_modo_legacy): un `path` de `documentos_listos` cuya captura Bronze
-        # NO ocurrió en ESTE run (p.ej. un fichero ya presente en
-        # `drive_sync.staging_dir` de una descarga anterior, que
-        # `sync_con_metadata()` no vuelve a reportar porque Drive no ve ningún
-        # cambio, pero que sigue pendiente de terminar su cadena porque un run
-        # previo se cortó antes de `generar_version`). Su fila Bronze puede
-        # existir igualmente (de ese run anterior), solo que no está en memoria
-        # de este proceso — así que se recalcula el MD5 directamente del
-        # fichero: mismo algoritmo que `document_store` ya aplica al
-        # capturarlo (`_hash_md5` sobre los mismos bytes), así que produce
-        # idéntico resultado sin tener que localizar esa captura pasada. El
-        # par de Drive de ese Bronze no se puede recuperar sin re-consultar
-        # Drive (fuera de scope aquí): se deja `None`/`None`.
+        # en_modo_legacy): un `path` cuya captura Bronze NO ocurrió en ESTE
+        # run (p.ej. un fichero ya presente en `drive_sync.staging_dir` de una
+        # descarga anterior, que `sync_con_metadata()` no vuelve a reportar
+        # porque Drive no ve ningún cambio, pero que sigue pendiente de
+        # terminar su cadena porque un run previo se cortó antes de acabar).
+        # Su fila Bronze puede existir igualmente (de ese run anterior), solo
+        # que no está en memoria de este proceso — así que se recalcula el
+        # MD5 directamente del fichero: mismo algoritmo que `document_store`
+        # ya aplica al capturarlo (`_hash_md5` sobre los mismos bytes), así
+        # que produce idéntico resultado sin tener que localizar esa captura
+        # pasada. El par de Drive de ese Bronze no se puede recuperar sin
+        # re-consultar Drive (fuera de scope aquí): se deja `None`/`None`.
         hash_md5_original = hashlib.md5(path.read_bytes()).hexdigest()
         drive_file_id_original = None
         modified_time_original = None
@@ -460,7 +507,7 @@ def _persistir_silver(
     with tempfile.TemporaryDirectory() as directorio_temporal:
         ruta_temporal = Path(directorio_temporal) / nombre
         ruta_temporal.write_text(contenido, encoding="utf-8")
-        document_store.capturar(
+        return document_store.capturar(
             ruta=ruta_temporal,
             capa="silver",
             flujo="teoria",
@@ -487,27 +534,33 @@ def _persistir_silver(
 def run_pipeline(
     carpetas: Optional[list[Path]] = None,
     *,
-    directorio_procesado: Optional[Path] = None,
     ruta_estado: Optional[Path] = None,
     traductor: Optional[Traductor] = None,
-    version: Optional[int] = None,
     drive_sync: Optional[Any] = None,
     document_store: Optional[Any] = None,
 ) -> ResultadoPipeline:
     """Ejecuta un run completo del Flujo A sobre los ficheros nuevos/modificados.
 
+    **Task 63, P25 — `directorio_procesado`/`version` se RETIRAN de esta
+    firma** (no se dejan como no-ops aceptados-pero-ignorados): existían
+    únicamente para pasarse a `generar_version`, que ya no se invoca desde
+    aquí (ver docstring del módulo). No hay ningún caller real fuera de este
+    repo que los pase — el único contrato externo documentado es el resumen
+    JSON de `scripts/run_pipeline.py` (que sí conserva su clave
+    `"version_dir"`, siempre `null`, ver `ResultadoPipeline`); los parámetros
+    de una función Python interna no son ese contrato. Un caller que los
+    pasara explícitamente obtendría un `TypeError` claro en vez de un no-op
+    silencioso — preferible dado que no hay uso real conocido que romper.
+
     - `carpetas`: carpetas vigiladas (por defecto `data/raw/books/` y
       `data/raw/notes/`, ver `src/theory/SPEC.md` §DriveMonitor). Carpetas
       que no existan se ignoran sin error (nada que vigilar en ellas). Ver
       `drive_sync` abajo para cómo cambia esta resolución en modo Drive-real.
-    - `directorio_procesado`: destino de `v{N}/` (por defecto `data/processed/`).
     - `ruta_estado`: `processed_files.json` de idempotencia (por defecto
       `data/state/processed_files.json`).
     - `traductor`: inyectable, se pasa tal cual a `normalize_language` (por
       defecto DeepL real — ver `language_normalizer.py`); en tests se inyecta
       un traductor sin red.
-    - `version`: se pasa tal cual a `generar_version` (por defecto, la
-      siguiente versión libre).
     - `drive_sync`: etapa 0 opcional (task 45, P23; contrato ampliado task 59,
       ver docstring del módulo §"Etapa 0 opcional"). `None` (por defecto) ->
       modo solo-local, ni una línea de comportamiento distinta de antes de
@@ -524,13 +577,16 @@ def run_pipeline(
       tarea. Un objeto con `.capturar(...)` (p.ej.
       `src.utils.document_store.DocumentStore`) -> captura Bronze de cada
       fichero (Drive o legacy) antes de que entre a `_procesar_fichero`, y
-      además, para cada documento que sobrevive a `generar_version` con éxito,
-      sube su `.md` renderizado a `silver.teoria_documentos`.
+      además, para cada documento que sobrevive a `_procesar_fichero` con
+      éxito, sube su `.md` renderizado a `silver.teoria_documentos`.
 
-    Marca cada fichero en `ruta_estado` SOLO tras completar con éxito toda
-    la cadena hasta `generar_version` (ver docstring del módulo, §Fricción
-    resuelta: DriveMonitor). Si no hay ningún fichero pendiente, no genera
-    ninguna versión nueva (`version_dir=None`, listas vacías).
+    Marca cada fichero en `ruta_estado` SOLO tras completar con éxito su
+    propia `_procesar_fichero` (ver docstring del módulo, §Fricción resuelta:
+    DriveMonitor) — cada fichero es independiente, ya no hay una fase batch
+    posterior (`generar_version`, retirada en la task 63) que pudiera tumbar
+    el grupo entero. Si no hay ningún fichero pendiente, `procesados`/
+    `fallidos` quedan vacíos y `version_dir` es `None` (como siempre desde
+    esta tarea, ver `ResultadoPipeline`).
     """
     fallidos: list[ResultadoFichero] = []
     # Paths cuya captura Bronze falló (Drive o legacy): se excluyen de esta
@@ -542,6 +598,17 @@ def run_pipeline(
     # en modo legacy. Lo puebla la propia captura Bronze de abajo (Drive o
     # legacy); lo consume `_persistir_silver` (§Etapa 1) sin releer ficheros.
     origen_bronze: dict[Path, tuple[str, Optional[str], Optional[str]]] = {}
+
+    # Contadores de lo realmente entregado (task 63, ver `ResultadoPipeline`):
+    # `bronze_activo`/`silver_activo` son el mismo interruptor (`document_store
+    # is not None`); los "nuevos"/"existentes" distinguen `ya_existia` de
+    # `ResultadoCaptura` en cada capa.
+    bronze_activo = document_store is not None
+    silver_activo = document_store is not None
+    bronze_nuevos = 0
+    bronze_existentes = 0
+    silver_nuevos = 0
+    silver_existentes = 0
 
     if drive_sync is not None:
         # Etapa 0: sincroniza Drive -> staging ANTES de que DriveMonitor
@@ -582,6 +649,10 @@ def run_pipeline(
                         archivo.file_id,
                         archivo.modified_time,
                     )
+                    if resultado_captura.ya_existia:
+                        bronze_existentes += 1
+                    else:
+                        bronze_nuevos += 1
 
     if carpetas is not None:
         carpetas = list(carpetas)
@@ -592,7 +663,6 @@ def run_pipeline(
     else:
         carpetas = [CARPETA_BOOKS_POR_DEFECTO, CARPETA_NOTES_POR_DEFECTO]
 
-    directorio_procesado = Path(directorio_procesado) if directorio_procesado is not None else DIRECTORIO_PROCESADO_POR_DEFECTO
     ruta_estado = Path(ruta_estado) if ruta_estado is not None else RUTA_ESTADO_POR_DEFECTO
 
     estado_comprometido = _cargar_estado(ruta_estado)
@@ -671,11 +741,21 @@ def run_pipeline(
                 rutas_captura_fallida.add(path)
             else:
                 origen_bronze[path] = (resultado_captura.hash_md5, None, None)
+                if resultado_captura.ya_existia:
+                    bronze_existentes += 1
+                else:
+                    bronze_nuevos += 1
 
     if rutas_captura_fallida:
         elegibles = [path for path in elegibles if path not in rutas_captura_fallida]
 
-    documentos_listos: list[tuple[Path, DocumentoEntrada]] = []
+    # Bucle único, por fichero independiente (task 63): ya no hay una fase
+    # batch (`generar_version`) que espere a que TODOS los `elegibles`
+    # terminen `_procesar_fichero` antes de decidir nada — cada fichero se
+    # marca como procesado y persiste su Silver en cuanto termina su propia
+    # cadena, sin depender del resto del batch (ver docstring del módulo,
+    # §Fricción resuelta: DriveMonitor).
+    procesados: list[Path] = []
 
     for path in elegibles:
         try:
@@ -683,45 +763,40 @@ def run_pipeline(
         except Exception as exc:  # noqa: BLE001 — cualquier fallo de la cadena cuenta
             fallidos.append(ResultadoFichero(path=path, error=str(exc)))
             continue
-        documentos_listos.append((path, documento))
 
-    version_dir: Optional[Path] = None
-    procesados: list[Path] = []
+        estado_comprometido[path.name] = estado_fresco[path.name]
+        procesados.append(path)
 
-    if documentos_listos:
-        documentos = [documento for _, documento in documentos_listos]
-        try:
-            version_dir = generar_version(documentos, directorio_procesado, version=version)
-        except Exception as exc:  # noqa: BLE001
-            # Fallo en el último paso: ningún fichero de este batch se marca
-            # como procesado (ver docstring del módulo) — todos vuelven a
-            # estar pendientes en el siguiente run.
-            fallidos.append(ResultadoFichero(path=Path("<generar_version>"), error=str(exc)))
-        else:
-            for path, documento in documentos_listos:
-                estado_comprometido[path.name] = estado_fresco[path.name]
-                procesados.append(path)
-
-                if document_store is not None:
-                    # Etapa 1: persistencia Silver (ver docstring del módulo).
-                    # Un fallo aquí NO deshace Bronze ni v{N} (ya completados
-                    # con éxito para `path`) ni excluye el fichero de
-                    # `procesados`/`ruta_estado` — se registra en `fallidos`
-                    # y el original queda seguro en Bronze de todas formas.
-                    try:
-                        _persistir_silver(document_store, path, documento, origen_bronze)
-                    except Exception as exc:  # noqa: BLE001 — no tumba el batch, ver docstring
-                        fallidos.append(
-                            ResultadoFichero(
-                                path=path, error=f"captura Silver fallida: {exc}"
-                            )
-                        )
+        if document_store is not None:
+            # Etapa 1: persistencia Silver (ver docstring del módulo). Un
+            # fallo aquí NO deshace Bronze (ya completado con éxito para
+            # `path`) ni excluye el fichero de `procesados`/`ruta_estado` —
+            # se registra en `fallidos` y el original queda seguro en Bronze
+            # de todas formas.
+            try:
+                resultado_silver = _persistir_silver(document_store, path, documento, origen_bronze)
+            except Exception as exc:  # noqa: BLE001 — no tumba el batch, ver docstring
+                fallidos.append(
+                    ResultadoFichero(
+                        path=path, error=f"captura Silver fallida: {exc}"
+                    )
+                )
+            else:
+                if resultado_silver.ya_existia:
+                    silver_existentes += 1
+                else:
+                    silver_nuevos += 1
 
     _guardar_estado(ruta_estado, estado_comprometido)
 
     return ResultadoPipeline(
-        version_dir=version_dir,
         procesados=procesados,
         fallidos=fallidos,
         ignorados=ignorados,
+        bronze_activo=bronze_activo,
+        bronze_nuevos=bronze_nuevos,
+        bronze_existentes=bronze_existentes,
+        silver_activo=silver_activo,
+        silver_nuevos=silver_nuevos,
+        silver_existentes=silver_existentes,
     )
