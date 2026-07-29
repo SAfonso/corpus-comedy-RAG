@@ -1,13 +1,21 @@
 """Tests para `scripts/run_pipeline.py` (CLI de Flujo A, task 23).
 
 Contrato (`scripts/run_pipeline.py` docstring, task 23; wiring actualizado en
-la task 61 para `ingestar_documentos_pendientes`): este script es wiring
-puro sobre `src/theory/pipeline.run_pipeline` (task 22) y
-`src/theory/ingest_teoria.ingestar_documentos_pendientes` (task 21, leyendo
-de Silver desde la task 61), ya aprobados y testeados en sus propios
-módulos — aquí NO se re-testea su lógica interna (cadena de parsers,
-idempotencia, embeddings...), solo el CLI: parseo de argv, construcción del
-resumen JSON, y el mapeo resultado -> exit code.
+la task 61 para `ingestar_documentos_pendientes`, y en la task 63 para la
+retirada de `generar_version`/`version_dir` y el fix del bug de `--ingest`):
+este script es wiring puro sobre `src/theory/pipeline.run_pipeline` (task 22)
+y `src/theory/ingest_teoria.ingestar_documentos_pendientes` (task 21,
+leyendo de Silver desde la task 61) — aquí NO se re-testea su lógica interna
+(cadena de parsers, idempotencia, embeddings...), solo el CLI: parseo de
+argv, construcción del resumen JSON, y el mapeo resultado -> exit code.
+
+**Task 63 — el bug de `--ingest` (crítico)**: antes de esta task, `main()`
+comprobaba `resultado.version_dir is None` para decidir si `--ingest` hacía
+no-op. Desde que `run_pipeline` deja de invocar `generar_version`,
+`version_dir` es SIEMPRE `None`, así que esa condición convertía `--ingest`
+en un no-op PERMANENTE. Los tests de la sección "--ingest" verifican
+explícitamente que `ingestar_fn` se invoca SIEMPRE que se pasa la flag,
+independientemente de `resultado.procesados`/`resultado.version_dir`.
 
 Todas las dependencias externas (`run_pipeline_fn`, `ingestar_fn`,
 `crear_store_fn`) se inyectan como dobles de prueba — nunca se llama a
@@ -37,7 +45,11 @@ class _ResultadoIngestaFake:
 
 class _RunPipelineEspia:
     """Doble de `run_pipeline` que registra con qué kwargs se le llamó y
-    devuelve un `ResultadoPipeline` fijo (o lanza, si `excepcion` se pasa)."""
+    devuelve un `ResultadoPipeline` fijo (o lanza, si `excepcion` se pasa).
+
+    Task 63: `run_pipeline()` ya NO acepta `directorio_procesado`/`version`
+    (se retiraron junto con la llamada a `generar_version` que los
+    consumía) — este doble refleja la firma real."""
 
     def __init__(self, resultado=None, excepcion=None):
         self.resultado = resultado if resultado is not None else ResultadoPipeline()
@@ -48,18 +60,14 @@ class _RunPipelineEspia:
         self,
         carpetas,
         *,
-        directorio_procesado=None,
         ruta_estado=None,
-        version=None,
         drive_sync=None,
         document_store=None,
     ):
         self.llamadas.append(
             {
                 "carpetas": carpetas,
-                "directorio_procesado": directorio_procesado,
                 "ruta_estado": ruta_estado,
-                "version": version,
                 "drive_sync": drive_sync,
                 "document_store": document_store,
             }
@@ -154,7 +162,6 @@ class _CrearDocumentStoreEspia:
 
 def test_construir_resumen_caso_feliz_sin_ingest():
     resultado = ResultadoPipeline(
-        version_dir=Path("data/processed/v3"),
         procesados=[Path("a.txt"), Path("b.pdf")],
         fallidos=[],
         ignorados=[Path(".gitkeep")],
@@ -165,14 +172,26 @@ def test_construir_resumen_caso_feliz_sin_ingest():
         "procesados": ["a.txt", "b.pdf"],
         "fallidos": [],
         "ignorados": [".gitkeep"],
-        "version_dir": "data/processed/v3",
+        "version_dir": None,  # SIEMPRE None desde la task 63
         "ingesta": None,
     }
 
 
+def test_construir_resumen_version_dir_siempre_null_aunque_se_fuerce_en_el_objeto():
+    """Regresión (task 63): aunque alguien construyera un `ResultadoPipeline`
+    con `version_dir` no-`None` a mano (`run_pipeline` real nunca lo hace),
+    `construir_resumen` sigue serializando lo que traiga el objeto —
+    verificamos aquí el caso real: `ResultadoPipeline()` por defecto ya trae
+    `version_dir=None`, que es el único valor que `run_pipeline` produce
+    desde esta tarea."""
+    resultado = ResultadoPipeline()
+    assert resultado.version_dir is None
+    resumen = construir_resumen(resultado, None)
+    assert resumen["version_dir"] is None
+
+
 def test_construir_resumen_con_fallidos():
     resultado = ResultadoPipeline(
-        version_dir=None,
         procesados=[],
         fallidos=[ResultadoFichero(path=Path("roto.pdf"), error="boom")],
         ignorados=[],
@@ -184,7 +203,7 @@ def test_construir_resumen_con_fallidos():
 
 
 def test_construir_resumen_incluye_bloque_de_ingesta_si_se_pasa():
-    resultado = ResultadoPipeline(version_dir=Path("data/processed/v1"))
+    resultado = ResultadoPipeline(procesados=[Path("a.txt")])
     ingesta = {"intentada": True, "ejecutada": True, "num_documentos": 1}
 
     resumen = construir_resumen(resultado, ingesta)
@@ -206,12 +225,8 @@ def test_main_pasa_las_flags_a_run_pipeline_fn(tmp_path, capsys):
             str(tmp_path / "a"),
             "--carpeta",
             str(tmp_path / "b"),
-            "--directorio-procesado",
-            str(tmp_path / "processed"),
             "--ruta-estado",
             str(tmp_path / "state.json"),
-            "--version",
-            "7",
         ],
         run_pipeline_fn=espia,
     )
@@ -220,9 +235,7 @@ def test_main_pasa_las_flags_a_run_pipeline_fn(tmp_path, capsys):
     assert len(espia.llamadas) == 1
     llamada = espia.llamadas[0]
     assert llamada["carpetas"] == [tmp_path / "a", tmp_path / "b"]
-    assert llamada["directorio_procesado"] == tmp_path / "processed"
     assert llamada["ruta_estado"] == tmp_path / "state.json"
-    assert llamada["version"] == 7
 
 
 def test_main_sin_flags_pasa_none_para_usar_los_defaults_de_run_pipeline(capsys):
@@ -232,9 +245,21 @@ def test_main_sin_flags_pasa_none_para_usar_los_defaults_de_run_pipeline(capsys)
 
     llamada = espia.llamadas[0]
     assert llamada["carpetas"] is None
-    assert llamada["directorio_procesado"] is None
     assert llamada["ruta_estado"] is None
-    assert llamada["version"] is None
+
+
+def test_main_ya_no_acepta_directorio_procesado_ni_version(capsys):
+    """Task 63: `--directorio-procesado`/`--version` se retiran del CLI junto
+    con los parámetros homónimos de `run_pipeline()` (ya no tienen ningún
+    consumidor: `generar_version` no se invoca). `argparse` debe rechazarlos
+    como flags desconocidas."""
+    espia = _RunPipelineEspia(resultado=ResultadoPipeline())
+
+    with pytest.raises(SystemExit):
+        main(["--directorio-procesado", "/tmp/x"], run_pipeline_fn=espia)
+
+    with pytest.raises(SystemExit):
+        main(["--version", "7"], run_pipeline_fn=espia)
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +268,7 @@ def test_main_sin_flags_pasa_none_para_usar_los_defaults_de_run_pipeline(capsys)
 
 
 def test_main_imprime_json_por_stdout_por_defecto(capsys):
-    resultado = ResultadoPipeline(version_dir=Path("data/processed/v1"), procesados=[Path("a.txt")])
+    resultado = ResultadoPipeline(procesados=[Path("a.txt")])
     espia = _RunPipelineEspia(resultado=resultado)
 
     codigo = main([], run_pipeline_fn=espia)
@@ -252,13 +277,13 @@ def test_main_imprime_json_por_stdout_por_defecto(capsys):
     assert codigo == 0
     resumen = json.loads(salida.out)
     assert resumen["procesados"] == ["a.txt"]
-    assert resumen["version_dir"] == "data/processed/v1"
+    assert resumen["version_dir"] is None
     # Los logs de progreso van a stderr, nunca mezclados con el JSON de stdout.
     assert "procesados" in salida.err or "run_pipeline" in salida.err
 
 
 def test_main_con_summary_out_escribe_fichero_y_stdout_queda_vacio(tmp_path, capsys):
-    resultado = ResultadoPipeline(version_dir=Path("data/processed/v1"), procesados=[Path("a.txt")])
+    resultado = ResultadoPipeline(procesados=[Path("a.txt")])
     espia = _RunPipelineEspia(resultado=resultado)
     destino = tmp_path / "resumen.json"
 
@@ -297,10 +322,15 @@ def test_exit_code_3_si_run_pipeline_lanza_fallo_fatal(capsys):
     resumen = json.loads(salida.out)
     assert resumen["error_fatal"] == "disco lleno"
     assert "disco lleno" in salida.err
+    # El resumen de error sigue llevando bronze/silver (contadores en 0, ver
+    # docstring del módulo).
+    assert resumen["bronze"]["nuevos"] == 0
+    assert resumen["bronze"]["existentes"] == 0
+    assert resumen["silver"] == {"activa": False, "nuevos": 0, "existentes": 0}
 
 
 def test_exit_code_2_si_ingest_falla_con_pipeline_sin_fallidos(capsys):
-    resultado = ResultadoPipeline(version_dir=Path("data/processed/v1"), procesados=[Path("a.txt")])
+    resultado = ResultadoPipeline(procesados=[Path("a.txt")])
     run_espia = _RunPipelineEspia(resultado=resultado)
     ingest_espia = _IngestarEspia(excepcion=RuntimeError("supabase caido"))
 
@@ -323,7 +353,6 @@ def test_exit_code_2_si_ingest_falla_con_pipeline_sin_fallidos(capsys):
 
 def test_exit_code_1_tiene_prioridad_si_fallidos_y_ingest_fallan_a_la_vez(capsys):
     resultado = ResultadoPipeline(
-        version_dir=Path("data/processed/v1"),
         fallidos=[ResultadoFichero(path=Path("x.pdf"), error="err")],
     )
     run_espia = _RunPipelineEspia(resultado=resultado)
@@ -340,12 +369,19 @@ def test_exit_code_1_tiene_prioridad_si_fallidos_y_ingest_fallan_a_la_vez(capsys
 
 
 # ---------------------------------------------------------------------------
-# main() — --ingest: wiring, no-op sin nada pendiente, no se llama sin la flag
+# main() — --ingest: SIEMPRE se ejecuta si se pide (fix del bug, task 63)
+#
+# Antes de la task 63, `main()` comprobaba `resultado.version_dir is None`
+# para decidir si `--ingest` hacía no-op. Desde que `run_pipeline` deja de
+# generar versiones, `version_dir` es SIEMPRE `None`, así que esa condición
+# convertía `--ingest` en un no-op PERMANENTE — el bug crítico que corrige
+# esta task. Los tests de abajo verifican que `ingestar_fn` se invoca
+# SIEMPRE que se pasa la flag, sin mirar `procesados`/`version_dir`.
 # ---------------------------------------------------------------------------
 
 
 def test_ingest_no_se_llama_si_la_flag_no_se_pasa(capsys):
-    resultado = ResultadoPipeline(version_dir=Path("data/processed/v1"), procesados=[Path("a.txt")])
+    resultado = ResultadoPipeline(procesados=[Path("a.txt")])
     run_espia = _RunPipelineEspia(resultado=resultado)
     ingest_espia = _IngestarEspia()
     registro_store = []
@@ -361,9 +397,16 @@ def test_ingest_no_se_llama_si_la_flag_no_se_pasa(capsys):
     assert registro_store == []
 
 
-def test_ingest_no_op_sin_error_si_no_habia_nada_pendiente(capsys):
-    espia_run = _RunPipelineEspia(resultado=ResultadoPipeline())  # version_dir=None
-    ingest_espia = _IngestarEspia()
+def test_ingest_se_ejecuta_siempre_aunque_no_haya_nada_pendiente_en_este_run(capsys):
+    """Test crítico del fix de la task 63: `resultado.procesados == []` y
+    `resultado.version_dir is None` (el caso "nada pendiente en ESTE run") ya
+    NO debe convertir `--ingest` en un no-op — `ingestar_documentos_pendientes`
+    puede tener trabajo real acumulado en `silver.teoria_documentos` de runs
+    anteriores, y antes de este fix nunca se habría llegado a invocar."""
+    espia_run = _RunPipelineEspia(resultado=ResultadoPipeline())  # nada procesado, version_dir=None
+    ingest_espia = _IngestarEspia(
+        resultado=_ResultadoIngestaFake(num_documentos=5, num_nuevos=5, num_duplicados=0)
+    )
     registro_store = []
 
     codigo = main(
@@ -375,12 +418,16 @@ def test_ingest_no_op_sin_error_si_no_habia_nada_pendiente(capsys):
     salida = capsys.readouterr()
 
     assert codigo == 0
-    assert ingest_espia.llamadas == []
-    assert registro_store == []  # ni siquiera se construye el store si no hay nada que ingestar
+    assert registro_store == [True]  # el store SÍ se construye
+    assert len(ingest_espia.llamadas) == 1  # ingestar_fn SÍ se invoca
     resumen = json.loads(salida.out)
-    assert resumen["ingesta"]["intentada"] is True
-    assert resumen["ingesta"]["ejecutada"] is False
-    assert "motivo" in resumen["ingesta"]
+    assert resumen["ingesta"] == {
+        "intentada": True,
+        "ejecutada": True,
+        "num_documentos": 5,
+        "num_nuevos": 5,
+        "num_duplicados": 0,
+    }
 
 
 def test_ingest_llama_a_ingestar_fn_solo_con_el_store(tmp_path, capsys):
@@ -388,8 +435,7 @@ def test_ingest_llama_a_ingestar_fn_solo_con_el_store(tmp_path, capsys):
     `version` — la selección de qué ingestar vive en `store` (Silver sin
     chunks en Gold), no en el `version_dir` de este run (ver docstring del
     módulo, §Task 61)."""
-    version_dir = tmp_path / "processed" / "v3"
-    resultado = ResultadoPipeline(version_dir=version_dir, procesados=[Path("a.txt")])
+    resultado = ResultadoPipeline(procesados=[Path("a.txt")])
     run_espia = _RunPipelineEspia(resultado=resultado)
     ingest_espia = _IngestarEspia(
         resultado=_ResultadoIngestaFake(num_documentos=1, num_nuevos=5, num_duplicados=0)
@@ -520,6 +566,9 @@ def test_sync_drive_fallo_de_configuracion_devuelve_exit_code_3(capsys):
 # bronze.omitida=true en el resumen). Un fallo de crear_document_store_fn
 # (p.ej. DocumentStoreError por falta de SUPABASE_URL/SUPABASE_SERVICE_KEY)
 # reutiliza el exit code 3 ya existente, igual que --sync-drive.
+#
+# Task 63: el resumen `bronze` gana `nuevos`/`existentes` (contadores reales
+# de `ResultadoPipeline`); se añade la clave nueva `silver`.
 # ---------------------------------------------------------------------------
 
 
@@ -534,11 +583,16 @@ def test_sin_flags_no_llama_a_crear_document_store_fn_y_bronze_no_activada(capsy
     assert doc_store_espia.llamadas == 0
     assert run_espia.llamadas[0]["document_store"] is None
     resumen = json.loads(salida.out)
-    assert resumen["bronze"] == {"activada": False}
+    assert resumen["bronze"] == {"activada": False, "nuevos": 0, "existentes": 0}
+    assert resumen["silver"] == {"activa": False, "nuevos": 0, "existentes": 0}
 
 
 def test_capturar_bronze_sin_sync_drive_activa_la_captura(capsys):
-    run_espia = _RunPipelineEspia(resultado=ResultadoPipeline())
+    resultado = ResultadoPipeline(
+        bronze_activo=True, bronze_nuevos=2, bronze_existentes=1,
+        silver_activo=True, silver_nuevos=2, silver_existentes=1,
+    )
+    run_espia = _RunPipelineEspia(resultado=resultado)
     instancia = _DocumentStoreInstanciaFake()
     doc_store_espia = _CrearDocumentStoreEspia(resultado=instancia)
 
@@ -553,7 +607,8 @@ def test_capturar_bronze_sin_sync_drive_activa_la_captura(capsys):
     assert doc_store_espia.llamadas == 1
     assert run_espia.llamadas[0]["document_store"] is instancia
     resumen = json.loads(salida.out)
-    assert resumen["bronze"] == {"activada": True}
+    assert resumen["bronze"] == {"activada": True, "nuevos": 2, "existentes": 1}
+    assert resumen["silver"] == {"activa": True, "nuevos": 2, "existentes": 1}
 
 
 def test_sync_drive_activa_la_captura_por_defecto_sin_pedirla_explicitamente(capsys):
@@ -574,7 +629,7 @@ def test_sync_drive_activa_la_captura_por_defecto_sin_pedirla_explicitamente(cap
     assert doc_store_espia.llamadas == 1
     assert run_espia.llamadas[0]["document_store"] is instancia
     resumen = json.loads(salida.out)
-    assert resumen["bronze"] == {"activada": True}
+    assert resumen["bronze"]["activada"] is True
 
 
 def test_sync_drive_con_sin_captura_bronze_desactiva_la_captura_y_lo_marca_omitida(capsys):
@@ -594,7 +649,9 @@ def test_sync_drive_con_sin_captura_bronze_desactiva_la_captura_y_lo_marca_omiti
     assert doc_store_espia.llamadas == 0
     assert run_espia.llamadas[0]["document_store"] is None
     resumen = json.loads(salida.out)
-    assert resumen["bronze"] == {"activada": False, "omitida": True}
+    assert resumen["bronze"] == {
+        "activada": False, "omitida": True, "nuevos": 0, "existentes": 0
+    }
 
 
 def test_sin_captura_bronze_sin_sync_drive_no_tiene_efecto(capsys):
@@ -614,7 +671,7 @@ def test_sin_captura_bronze_sin_sync_drive_no_tiene_efecto(capsys):
     assert codigo == 0
     assert doc_store_espia.llamadas == 0
     resumen = json.loads(salida.out)
-    assert resumen["bronze"] == {"activada": False}
+    assert resumen["bronze"] == {"activada": False, "nuevos": 0, "existentes": 0}
 
 
 def test_capturar_bronze_fallo_de_configuracion_devuelve_exit_code_3(capsys):

@@ -21,6 +21,21 @@ exige tocar `pipeline.py`/`ResultadoPipeline`, que hoy no exponen los
 `fila_id` de Silver escritos en un run). `_version_desde_dir` desaparece con
 ese uso.
 
+**Task 63 — `--ingest` deja de ser un no-op cuando `version_dir is None`**:
+la task 61 dejó `ingestar_documentos_pendientes` completamente resumible
+(no depende de qué generó este run), pero `main()` todavía tenía una rama
+`if resultado.version_dir is None: ... no-op ...` heredada de antes de P25.
+Con la task 63, `run_pipeline` NUNCA vuelve a generar una versión —
+`resultado.version_dir` es SIEMPRE `None` — así que esa condición convertía
+`--ingest` en un no-op PERMANENTE, sin importar cuánto se acumulara en
+`silver.teoria_documentos`: un bug que habría roto la cadena
+Drive→Bronze→Silver→Gold en producción. Corregido: con `--ingest` presente,
+`ingestar_fn` se invoca SIEMPRE (ver §"`--ingest` siempre se ejecuta si se
+pide" abajo) — sigue siendo barato si no hay nada pendiente en Silver, porque
+`ingestar_documentos_pendientes` ya gestiona ese caso devolviendo
+`num_nuevos=0`, no es responsabilidad de este CLI adivinarlo mirando
+`version_dir`.
+
 **Por qué el contrato de CLI importa más de lo habitual**: este script no es
 solo conveniencia interna — lo invoca por `subprocess` un proyecto RAG
 externo sin acceso al código Python de este repo. Necesita exit codes
@@ -43,7 +58,7 @@ Esquema del resumen (siempre las mismas claves, ver `construir_resumen`):
       "procesados": ["ruta/fichero.txt", ...],
       "fallidos": [{"path": "...", "error": "..."}, ...],
       "ignorados": ["ruta/fichero.sin_parser", ...],
-      "version_dir": "data/processed/v3" | null,
+      "version_dir": null,  # SIEMPRE null desde la task 63, P25 (ver abajo)
       "ingesta": null | {
           "intentada": true,
           "ejecutada": true | false,
@@ -55,9 +70,24 @@ Esquema del resumen (siempre las mismas claves, ver `construir_resumen`):
       "bronze": {
           "activada": true | false,
           # si activada=false por --sin-captura-bronze (solo con --sync-drive):
-          "omitida": true
+          "omitida": true,
+          "nuevos": N, "existentes": M  # ResultadoPipeline.bronze_* (task 63)
+      },
+      "silver": {
+          "activa": true | false,       # ResultadoPipeline.silver_activo
+          "nuevos": N, "existentes": M  # ResultadoPipeline.silver_*
       }
     }
+
+**`"version_dir"` (task 63, P25)**: se mantiene SIEMPRE `null` — es un
+contrato externo (ver §"Por qué el contrato de CLI importa más de lo
+habitual" abajo), y `null` es exactamente lo que ya significaba "este run no
+produjo versión" antes de esta tarea. `run_pipeline` ya no genera ninguna
+versión nunca (ver `src/theory/pipeline.py`), así que el valor no cambia,
+solo deja de variar. Lo realmente entregado en este run se reporta en las
+claves NUEVAS `"bronze"`/`"silver"` (con contadores reales), que un
+consumidor anterior a esta tarea simplemente ignora sin enterarse — no se
+quita ninguna clave documentada, solo se añaden.
 
 ## Semántica de exit codes (`_exit_code`)
 
@@ -124,19 +154,33 @@ envuelve `run_pipeline_fn`/`drive_sync_instance`: un fallo de configuración de
 Supabase (típicamente `SUPABASE_URL`/`SUPABASE_SERVICE_KEY` ausentes) reutiliza
 el mismo exit code `3` de "fallo fatal antes de completar el run" — mismo
 criterio que `DRIVE_FOLDER_ID` con `--sync-drive`. El resumen JSON lleva
-`bronze.activada` siempre, y `bronze.omitida=true` en el caso explícito
-`--sync-drive --sin-captura-bronze` (contractual, ver `src/theory/SPEC.md`).
+`bronze.activada` siempre, `bronze.omitida=true` en el caso explícito
+`--sync-drive --sin-captura-bronze` (contractual, ver `src/theory/SPEC.md`),
+y desde la task 63 también `bronze.nuevos`/`bronze.existentes` (contadores
+reales de `ResultadoPipeline.bronze_nuevos`/`bronze_existentes` — 0/0 si la
+captura no llegó a activarse, p.ej. por un fallo fatal antes de completar el
+run). La clave `"silver"` (nueva en la task 63) refleja
+`ResultadoPipeline.silver_activo`/`silver_nuevos`/`silver_existentes` —
+mismo interruptor que Bronze (`document_store is not None`), sin una clave
+de configuración propia porque Silver no tiene flags CLI independientes de
+Bronze.
 
-## `--ingest` cuando no había nada pendiente
+## `--ingest` siempre se ejecuta si se pide (task 63, P25)
 
-Si `run_pipeline` no generó ninguna versión nueva (`version_dir=None`),
-`--ingest` sigue siendo **no-op sin error** — mismo criterio de antes de la
-task 61, sin cambiar de significado (`src/theory/SPEC.md` §Task 61: `v{N}`
-sigue existiendo hasta la task 63, así que `version_dir=None` sigue siendo
-una señal razonable de "este run no procesó nada"), aunque desde la task 61
-`ingestar_documentos_pendientes` en sí ya no depende de `version_dir` en
-absoluto (lee de Silver, no de disco) — el resumen lo refleja con
-`ingesta.ejecutada=false` y un `motivo` explícito.
+Antes de la task 63, `--ingest` comprobaba `resultado.version_dir is None`
+para decidir si había "algo pendiente" que ingestar, y si lo era, hacía
+no-op sin llamar a `ingestar_fn`. Esa condición dejó de tener sentido en
+cuanto `run_pipeline` dejó de generar versiones: `version_dir` pasa a ser
+SIEMPRE `None` (ver `src/theory/pipeline.py`), así que la condición original
+habría convertido `--ingest` en un no-op PERMANENTE — nunca volvería a
+ingestar nada, ni con `silver.teoria_documentos` lleno de filas sin chunks en
+Gold. Corregido: con `--ingest` presente, `ingestar_fn` se invoca SIEMPRE,
+sin mirar `resultado.version_dir` ni `resultado.procesados` — la propia
+`ingestar_documentos_pendientes` (task 61) ya es resumible por sí misma (lee
+"todas las filas Silver sin chunks en Gold", no depende de qué generó este
+run en concreto) y ya devuelve `num_nuevos=0` sin error cuando no hay nada
+pendiente, así que no hace falta que este CLI adivine el caso "nada que
+ingestar" mirando un campo que ya no significa eso.
 
 ## Credenciales de Supabase — solo si `--ingest`
 
@@ -199,16 +243,36 @@ def construir_resumen(resultado: ResultadoPipeline, ingesta: Optional[dict]) -> 
     }
 
 
-def _resumen_bronze(activada: bool, omitida: bool) -> dict:
+def _resumen_bronze(resultado: ResultadoPipeline, activada: bool, omitida: bool) -> dict:
     """Construye la clave `bronze` del resumen (task 59, ver docstring del
     módulo §--capturar-bronze / --sin-captura-bronze). `omitida=True` es
     contractual para el caso `--sync-drive --sin-captura-bronze`; el resto de
     la forma (`activada` siempre presente) es criterio de esta implementación,
-    consistente con cómo `ingesta`/`error_fatal` documentan su propio estado."""
+    consistente con cómo `ingesta`/`error_fatal` documentan su propio estado.
+    `activada`/`omitida` reflejan la CONFIGURACIÓN pedida por CLI (siguen
+    presentes aunque `run_pipeline_fn` falle antes de completar el run);
+    `nuevos`/`existentes` (task 63) son los contadores REALES de
+    `resultado.bronze_nuevos`/`bronze_existentes` — 0/0 si la captura no
+    llegó a ejecutarse."""
     bronze: dict = {"activada": activada}
     if omitida:
         bronze["omitida"] = True
+    bronze["nuevos"] = resultado.bronze_nuevos
+    bronze["existentes"] = resultado.bronze_existentes
     return bronze
+
+
+def _resumen_silver(resultado: ResultadoPipeline) -> dict:
+    """Construye la clave `silver` del resumen (task 63, P25) — sin flags CLI
+    propios (mismo interruptor que Bronze, `document_store is not None`), así
+    que, a diferencia de `_resumen_bronze`, `activa` refleja directamente
+    `resultado.silver_activo` (el estado real tras ejecutar `run_pipeline_fn`,
+    no una intención de configuración previa)."""
+    return {
+        "activa": resultado.silver_activo,
+        "nuevos": resultado.silver_nuevos,
+        "existentes": resultado.silver_existentes,
+    }
 
 
 def _exit_code(resultado: ResultadoPipeline, ingest_fallo: bool) -> int:
@@ -236,9 +300,10 @@ def _construir_parser() -> argparse.ArgumentParser:
         prog="run_pipeline.py",
         description=(
             "CLI estable de Flujo A (Teoria): ejecuta run_pipeline "
-            "(DriveMonitor -> Parser -> ... -> /data/processed/v{N}/) y, con "
-            "--ingest, vuelca a Supabase las filas de silver.teoria_documentos "
-            "aun pendientes (ingestar_documentos_pendientes). Contrato pensado para invocacion externa por "
+            "(DriveMonitor -> Parser -> ... -> Bronze/Silver en Supabase, "
+            "opcional) y, con --ingest, vuelca a Supabase las filas de "
+            "silver.teoria_documentos aun pendientes "
+            "(ingestar_documentos_pendientes). Contrato pensado para invocacion externa por "
             "subprocess (p.ej. desde un proyecto RAG sin acceso al codigo "
             "Python de este repo): el resumen se imprime como JSON por stdout "
             "(unico contenido de stdout) o se escribe en --summary-out si se "
@@ -261,13 +326,12 @@ def _construir_parser() -> argparse.ArgumentParser:
             "src/theory/pipeline.py)."
         ),
     )
-    parser.add_argument(
-        "--directorio-procesado",
-        dest="directorio_procesado",
-        type=Path,
-        default=None,
-        help="Destino de v{N}/ (por defecto data/processed/).",
-    )
+    # `--directorio-procesado`/`--version` se RETIRAN en la task 63 (P25),
+    # junto con sus parámetros homónimos de `run_pipeline()`: existían solo
+    # para pasarse a `generar_version`, que ya no se invoca (ver
+    # `src/theory/pipeline.py`). Sin evidencia de ningún caller externo que
+    # los use (el contrato externo real es el resumen JSON, no estos flags),
+    # se retiran en vez de dejarse como no-ops silenciosos.
     parser.add_argument(
         "--ruta-estado",
         dest="ruta_estado",
@@ -279,20 +343,16 @@ def _construir_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--version",
-        dest="version",
-        type=int,
-        default=None,
-        help="Numero de version explicito para generar_version (por defecto, la siguiente libre).",
-    )
-    parser.add_argument(
         "--ingest",
         action="store_true",
         help=(
             "Tras un run con exito, ingesta las filas de silver.teoria_documentos "
             "aun sin chunks en Supabase (ingestar_documentos_pendientes, "
-            "gold.teoria_chunks). Si no habia nada pendiente en este run "
-            "(version_dir=None), no-op sin error (ver docstring del modulo)."
+            "gold.teoria_chunks). Se ejecuta SIEMPRE que se pase esta flag "
+            "(task 63: ya no depende de si este run en concreto proceso algo "
+            "nuevo) — ingestar_documentos_pendientes ya es resumible por si "
+            "sola y no falla si no hay nada pendiente (ver docstring del "
+            "modulo)."
         ),
     )
     parser.add_argument(
@@ -406,10 +466,11 @@ def main(
         if captura_bronze_activada:
             document_store_instance = crear_document_store_fn()
 
+        # `directorio_procesado`/`version` ya NO se pasan (task 63): se
+        # retiraron de `run_pipeline()` junto con la llamada a
+        # `generar_version` que los consumía (ver `src/theory/pipeline.py`).
         kwargs_run_pipeline: dict = {
-            "directorio_procesado": args.directorio_procesado,
             "ruta_estado": args.ruta_estado,
-            "version": args.version,
         }
         if drive_sync_instance is not None:
             kwargs_run_pipeline["drive_sync"] = drive_sync_instance
@@ -419,16 +480,17 @@ def main(
         resultado = run_pipeline_fn(args.carpetas, **kwargs_run_pipeline)
     except Exception as exc:  # noqa: BLE001 — red de seguridad, ver §Semántica de exit codes
         print(f"run_pipeline: fallo fatal antes de completar el run: {exc}", file=sys.stderr)
-        resumen = construir_resumen(ResultadoPipeline(), None)
+        resultado_vacio = ResultadoPipeline()
+        resumen = construir_resumen(resultado_vacio, None)
         resumen["error_fatal"] = str(exc)
-        resumen["bronze"] = _resumen_bronze(captura_bronze_activada, bronze_omitida)
+        resumen["bronze"] = _resumen_bronze(resultado_vacio, captura_bronze_activada, bronze_omitida)
+        resumen["silver"] = _resumen_silver(resultado_vacio)
         _emitir_resumen(resumen, args.summary_out)
         return 3
 
     print(
         f"run_pipeline: {len(resultado.procesados)} procesados, "
-        f"{len(resultado.fallidos)} fallidos, {len(resultado.ignorados)} ignorados"
-        + (f", version_dir={resultado.version_dir}" if resultado.version_dir else ""),
+        f"{len(resultado.fallidos)} fallidos, {len(resultado.ignorados)} ignorados",
         file=sys.stderr,
     )
 
@@ -436,38 +498,37 @@ def main(
     ingest_fallo = False
 
     if args.ingest:
-        if resultado.version_dir is None:
+        # Task 63: se invoca SIEMPRE que se pida la flag, sin mirar
+        # `resultado.version_dir`/`resultado.procesados` — ver docstring del
+        # módulo §"--ingest siempre se ejecuta si se pide". El no-op
+        # condicionado a `version_dir is None` desapareció: `version_dir` es
+        # SIEMPRE `None` desde esta tarea, así que esa condición habría
+        # convertido `--ingest` en un no-op permanente.
+        try:
+            store = crear_store_fn()
+            resultado_ingesta = ingestar_fn(store)
+        except Exception as exc:  # noqa: BLE001
+            ingest_fallo = True
+            ingesta_info = {"intentada": True, "ejecutada": False, "error": str(exc)}
+            print(f"--ingest: fallo: {exc}", file=sys.stderr)
+        else:
             ingesta_info = {
                 "intentada": True,
-                "ejecutada": False,
-                "motivo": "no se genero ninguna version nueva en este run (nada pendiente)",
+                "ejecutada": True,
+                "num_documentos": resultado_ingesta.num_documentos,
+                "num_nuevos": resultado_ingesta.num_nuevos,
+                "num_duplicados": resultado_ingesta.num_duplicados,
             }
-            print("--ingest: no-op (nada pendiente en este run)", file=sys.stderr)
-        else:
-            try:
-                store = crear_store_fn()
-                resultado_ingesta = ingestar_fn(store)
-            except Exception as exc:  # noqa: BLE001
-                ingest_fallo = True
-                ingesta_info = {"intentada": True, "ejecutada": False, "error": str(exc)}
-                print(f"--ingest: fallo: {exc}", file=sys.stderr)
-            else:
-                ingesta_info = {
-                    "intentada": True,
-                    "ejecutada": True,
-                    "num_documentos": resultado_ingesta.num_documentos,
-                    "num_nuevos": resultado_ingesta.num_nuevos,
-                    "num_duplicados": resultado_ingesta.num_duplicados,
-                }
-                print(
-                    f"--ingest: {resultado_ingesta.num_nuevos} nuevos, "
-                    f"{resultado_ingesta.num_duplicados} duplicados "
-                    f"({resultado_ingesta.num_documentos} documentos Silver)",
-                    file=sys.stderr,
-                )
+            print(
+                f"--ingest: {resultado_ingesta.num_nuevos} nuevos, "
+                f"{resultado_ingesta.num_duplicados} duplicados "
+                f"({resultado_ingesta.num_documentos} documentos Silver)",
+                file=sys.stderr,
+            )
 
     resumen = construir_resumen(resultado, ingesta_info)
-    resumen["bronze"] = _resumen_bronze(captura_bronze_activada, bronze_omitida)
+    resumen["bronze"] = _resumen_bronze(resultado, captura_bronze_activada, bronze_omitida)
+    resumen["silver"] = _resumen_silver(resultado)
     _emitir_resumen(resumen, args.summary_out)
 
     return _exit_code(resultado, ingest_fallo)
