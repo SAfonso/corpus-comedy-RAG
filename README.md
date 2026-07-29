@@ -6,59 +6,63 @@
 ![markitdown](https://img.shields.io/badge/markitdown-PDF%2FDOCX%E2%86%92MD-000000?style=flat-square&logo=microsoft&logoColor=white)
 ![DeepL](https://img.shields.io/badge/DeepL-translation-0F2B46?style=flat-square)
 ![pytest](https://img.shields.io/badge/tested%20with-pytest-0A9EDC?style=flat-square&logo=pytest&logoColor=white)
-![Estado](https://img.shields.io/badge/status-31%2F47%20tareas%20%E2%80%94%20Flujo%20B%20webhook%20planificado-brightgreen?style=flat-square)
+![Estado](https://img.shields.io/badge/status-63%2F69%20tareas%20%E2%80%94%20P25%20en%20producci%C3%B3n-brightgreen?style=flat-square)
 
 > Pipeline de **ingesta, limpieza, estructuración y versionado** de datos para el
 > **Comedy RAG**. Corpus **multi-fuente**: cada unidad lleva `tipo_fuente` para
 > permitir *retrieval* separado por origen en el RAG *downstream*.
 
-**Estado:** 31/47 tareas del backlog cerradas (ver [`feature_list.json`](feature_list.json)).
-El backlog original (1-31) está **completo**: los tres flujos tienen su
-orquestador importable, y A/C tienen además CLI estable + automatización.
-Las 16 tareas restantes (32-47, todas `pending`, aún sin implementar) son
-una segunda ronda de planificación que cierra dos huecos dejados fuera a
-propósito: conectividad real de Telegram (Flujo B, hoy solo tiene la
-ingesta Bronze) e integración real con Google Drive para Flujo A (P18,
-diferida desde el principio). `schema.sql` está aplicado por completo en
-el proyecto Supabase real (incluida la ampliación de
-`teoria_chunks`/`chistes_telegram_bronze` de las tasks 16/21 — ver nota de
-`ALTER TABLE` en la cabecera de `schema.sql` para próximas ampliaciones de
-tablas ya existentes) y `pytest tests/integration -v` pasa de verdad contra
-Supabase + Gemini.
-- **Flujo A (Teoría):** completo — los 8 componentes de la cadena implementados
-  y testeados (`DriveMonitor` → ... → `FormatNormalizer` → `/data/processed/v{N}/`),
-  `validate_corpus.py` como gate de validación, `src/theory/pipeline.py`
-  (task 22) como orquestador importable con reanudación por
-  `processed_files.json`, y `scripts/run_pipeline.py` (task 23) como CLI
-  estable para invocación externa por `subprocess`. Pendiente (tasks 42-45,
-  planificadas): cerrar P18 sustituyendo `DriveMonitor` sobre carpeta local
-  por integración real con la API de Drive, reutilizando el patrón ya
-  validado en Flujo C (`historico/drive_source.py`).
-- **Contrato compartido B/C:** `supabase_store.py` + DDL, `silver.py` (LLM), el
-  mapeo de taxonomías (loop acotado P16) y `reconciliacion.py` (dedup
-  hash+embedding, task 15) implementados. Pendiente (tasks 33-34,
-  planificadas): extraer el routing a Supabase de `historico/pipeline.py`
-  a un módulo compartido (`src/jokes/routing.py`) para que Flujo B lo
-  reutilice sin duplicar lógica.
-- **Flujo C (Histórico):** completo end-to-end — `marcar_remates.py`,
-  `loader.py`, `segmentador.py` (frontera determinista por `[REMATE]`,
-  inicio de setup por LLM sin loop, task 19), integración real con Drive
-  (`drive_source.py`, task 30), `coste.py` como gate de presupuesto
-  dry-run (task 26), `historico/pipeline.py` como orquestador (task 27) y
-  `scripts/run_historico.py` como CLI estable (task 28), automatizado por
-  `.github/workflows/run_historico_semanal.yml` (cron semanal desatendido,
-  task 31).
-- **Flujo B (Telegram):** `telegram_bot.py` implementado (Bronze inmutable,
-  idempotencia por `telegram_update_id`, pre-limpieza mínima, task 16).
-  Pendiente (tasks 32-41 + 46-47, planificadas, no implementadas): cierre
-  end-to-end vía **webhook** (no polling) — orquestador Bronze→Silver→
-  Reconciliación, app FastAPI con validación de `secret_token`, respuesta
-  200 inmediata con el tramo LLM en background, recuperación de fallos
-  post-200 vía columna `procesado_at` + script de reproceso, y despliegue
-  en contenedor Docker (GitHub Actions + SSH, sin Coolify) detrás de Caddy
-  en el puerto 8443 del VPS.
-- **Ingesta de teoría a Supabase** (`teoria_chunks` + índice pgvector
-  compartido, task 21): implementada (`src/theory/ingest_teoria.py`).
+**Estado:** 63/69 tareas del backlog cerradas (ver [`feature_list.json`](feature_list.json)).
+Los tres flujos están en producción real (Supabase + VPS), y **P25** — la
+reorganización del almacenamiento a tres schemas reales de Postgres
+(`bronze`/`silver`/`gold`, con Bronze durable también en Storage para
+Teoría e Histórico, no solo Telegram) — está **ejecutada en el proyecto
+Supabase real** (cutover, task 56) y prácticamente cerrada para Flujo A.
+Las 6 tareas restantes (64-69, `pending`) extienden P25 a Flujo C (captura
+Bronze/Silver del histórico), ejecutan el backfill retroactivo del material
+de teoría ya existente en local, añaden la validación de topología
+cross-capa a `validate_corpus.py` y actualizan la documentación de overview
+al estado post-P25. `schema.sql` (3 schemas) está aplicado por completo en
+el proyecto Supabase real y `pytest tests/integration -v` pasa contra
+Supabase + Gemini reales.
+- **Flujo A (Teoría):** completo y migrado a P25 — la cadena
+  `DriveSync → DocumentStore (Bronze) → Parser → ... → FormatNormalizer →
+  DocumentStore (Silver)` sube el original intacto a `bronze.teoria_documentos`
+  (bucket `bronze-teoria`) y el `.md` limpio/traducido a
+  `silver.teoria_documentos` (bucket `silver-teoria`) — el pipeline **ya no
+  escribe `/data/processed/v{N}/`** (retirado en la task 63; el código de
+  `generar_version` se conserva sin llamador, ver `format_normalizer.py`).
+  `ingest_teoria.py` puebla `gold.teoria_chunks` leyendo directamente de
+  Silver (task 61), y `validate_corpus.py` valida el contenido de las filas
+  Silver vigentes en vez de un `manifest.json` (task 62). `src/theory/pipeline.py`
+  (orquestador importable) y `scripts/run_pipeline.py` (CLI estable,
+  `--sync-drive`/`--capturar-bronze`/`--ingest`) exponen todo esto por
+  inyección, con el modo solo-local original intacto bit a bit. Pendiente
+  (tasks 66-67): backfill retroactivo del material ya presente en
+  `data/raw/` (7 libros + 25 transcripciones) a Bronze en modo legacy.
+- **Contrato compartido B/C:** `supabase_store.py`/`teoria_store.py`
+  *schema-aware* (task 54), `src/jokes/routing.py` compartido (tasks 33-34),
+  `silver.py` (LLM), taxonomías (loop acotado P16), `reconciliacion.py`
+  (dedup hash+embedding) y `document_store.py` (`src/utils/`, task 58 —
+  componente compartido de captura durable Bronze/Silver por Drive o modo
+  legacy, orden objeto-antes-que-fila, usado ya por Teoría) implementados.
+- **Flujo C (Histórico):** completo end-to-end sobre el modelo pre-P25
+  (`marcar_remates.py`, `loader.py`, `segmentador.py`, integración real con
+  Drive, `coste.py` como gate de presupuesto, `historico/pipeline.py` +
+  `scripts/run_historico.py`, cron semanal desatendido). Pendiente (tasks
+  64-65, planificadas): extender la captura Bronze/Silver de P25 también a
+  este flujo (`bronze.historico_documentos`/`silver.historico_documentos`),
+  mismo patrón ya validado en Flujo A.
+- **Flujo B (Telegram):** **en producción real**, vía **webhook** (no
+  polling) — orquestador Bronze→Silver→Reconciliación, app FastAPI con
+  validación de `secret_token`, respuesta 200 inmediata con el tramo LLM en
+  background, recuperación de fallos post-200 vía columna `procesado_at` +
+  script de reproceso, desplegado en contenedor Docker (GitHub Actions +
+  SSH) detrás de Caddy en el puerto 8443 del VPS, con TLS vía DNS-01
+  (Porkbun). Ya migrado a P25 (`bronze.chistes_telegram`/`silver.chistes`).
+- **Ingesta de teoría a Supabase** (`gold.teoria_chunks` + índice pgvector
+  compartido): implementada, leyendo de `silver.teoria_documentos`
+  (`src/theory/ingest_teoria.py`, task 61).
 
 **Metodología:** SDD estricto (spec → tests con fixtures reales → implementación).
 **Fuente de verdad:** [`docs/specs/00-overview.md`](docs/specs/00-overview.md) — la spec
@@ -85,12 +89,20 @@ procesado y aterriza en el almacén correspondiente, que alimenta el RAG.
 
 | Flujo | Módulo | Origen | Naturaleza | Destino |
 |-------|--------|--------|------------|---------|
-| **A — Teoría** | `src/theory/` | Libros/cursos (`data/raw/books/` local; Drive real diferido, P18) | Batch, **determinista**, coste 0 | Ficheros `/data/processed/v{N}/` |
-| **B — Chistes propios** | `src/jokes/telegram/` (+ `src/jokes/` compartido) | Telegram (tiempo real) | Bronze → Silver (LLM) | Supabase |
-| **C — Chistes históricos** | `src/jokes/historico/` (+ `src/jokes/` compartido) | Textos propios ya escritos | Batch retroactivo | Supabase |
+| **A — Teoría** | `src/theory/` | Libros/cursos/transcripciones (Google Drive real o `data/raw/` local) | Batch, **determinista**, coste 0 | Supabase: `bronze.teoria_documentos` → `silver.teoria_documentos` → `gold.teoria_chunks` (buckets `bronze-teoria`/`silver-teoria`) |
+| **B — Chistes propios** | `src/jokes/telegram/` (+ `src/jokes/` compartido) | Telegram (tiempo real, webhook en producción) | Bronze → Silver (LLM) | Supabase: `bronze.chistes_telegram` → `silver.chistes` |
+| **C — Chistes históricos** | `src/jokes/historico/` (+ `src/jokes/` compartido) | Textos propios ya escritos (Drive) | Batch retroactivo | Supabase: `silver.chistes` (captura Bronze/Silver propia pendiente, tasks 64-65) |
+
+Los tres schemas (`bronze`/`silver`/`gold`) son reales en Postgres desde el
+cutover de P25 (task 56) — antes vivían todos bajo `public`, separados solo
+por sufijo de nombre de tabla. Bronze es **append-only** en los tres flujos:
+nunca se sobrescribe una fila ni su objeto en Storage — una edición del
+original entra como fila nueva, con clave `(drive_file_id, modified_time)`
+en modo Drive o `hash_md5` en modo legacy (ver `CLAUDE.md` §Regla más
+importante).
 
 **`tipo_fuente`** (enum cerrado): `teoria · transcripcion_curso · propio · propio_historico`
-- `externo*` = `{teoria, transcripcion_curso}` → limpieza agresiva, ficheros `v{N}`.
+- `externo*` = `{teoria, transcripcion_curso}` → limpieza agresiva, Bronze/Silver/Gold en Supabase.
 - `propio*` = `{propio, propio_historico}` → Bronze/Silver, Supabase, versión por chiste.
 
 ### Notas de diseño clave
@@ -104,9 +116,10 @@ procesado y aterriza en el almacén correspondiente, que alimenta el RAG.
 - **Parser de teoría vía markitdown** (P17): `pdf_parser`/`docx_parser` convierten a
   Markdown con [`markitdown`](https://github.com/microsoft/markitdown); Tesseract
   queda como *fallback* OCR para páginas escaneadas. Nunca toca `/data/raw/` (sagrado).
-- **DriveMonitor sobre carpeta local** (P18, de momento): vigila `data/raw/books/` y
-  `data/raw/notes/` en vez de la API de Google Drive — misma idempotencia por hash MD5.
-  La integración real con Drive queda diferida, sin tocar el resto de la cadena.
+- **Drive real (P23) sobre `src/utils/drive_sync.py` compartido**, con `DriveMonitor`
+  vigilando el staging local resultante — mismo mecanismo de idempotencia por hash MD5.
+  El modo solo-local (`data/raw/books/`/`data/raw/notes/`, sin credenciales) se mantiene
+  intacto como *default* de desarrollo y tests (`--sync-drive` activa Drive real).
 
 ---
 
@@ -114,7 +127,7 @@ procesado y aterriza en el almacén correspondiente, que alimenta el RAG.
 
 ```
 src/
-├── utils/            # COMPARTIDO: language_detector, quality_scorer, llm/ — SPEC.md
+├── utils/            # COMPARTIDO: drive_sync, document_store, language_detector, quality_scorer, llm/ — SPEC.md
 ├── theory/           # Flujo A: drive_monitor, parsers/, cleaners/, normalizers/, pipeline.py — SPEC.md
 └── jokes/            # Contrato compartido B/C: silver, reconciliacion, supabase_store — SPEC.md
     ├── telegram/       # Flujo B: telegram_bot — SPEC.md
@@ -138,7 +151,7 @@ para tocar un módulo. Directriz completa en
 **Teoría (coste 0):** `markitdown` (PDF/DOCX → Markdown, P17), `pytesseract` +
 `pdf2image` (OCR *fallback* para escaneados), `ebooklib` (EPUB), `langdetect`,
 `deep-translator` (DeepL free tier), `APScheduler`, `google-api-python-client`
-(Drive real, diferido — P18).
+(Drive real, P23).
 **Chistes:** Supabase (Postgres + pgvector), `python-telegram-bot`, cliente LLM vía API, embeddings.
 
 ---
@@ -151,7 +164,7 @@ bash init.sh                  # crea .venv/, instala dependencias, valida el ent
 source .venv/bin/activate
 pytest tests/unit -v          # tests unitarios
 pytest tests/integration -v   # tests de integración
-python scripts/validate_corpus.py   # antes de cada commit
+python scripts/validate_corpus.py   # gate de contenido — por defecto valida Supabase (silver.teoria_documentos vigentes), necesita SUPABASE_URL/SUPABASE_SERVICE_KEY; con una ruta explícita valida un directorio de .md sueltos sin red (fixtures/tests)
 ```
 
 > `init.sh` crea el venv porque el sistema puede ser "externally-managed" (PEP 668)
