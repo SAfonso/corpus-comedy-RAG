@@ -50,6 +50,7 @@ class _RunPipelineEspia:
         ruta_estado=None,
         version=None,
         drive_sync=None,
+        document_store=None,
     ):
         self.llamadas.append(
             {
@@ -58,6 +59,7 @@ class _RunPipelineEspia:
                 "ruta_estado": ruta_estado,
                 "version": version,
                 "drive_sync": drive_sync,
+                "document_store": document_store,
             }
         )
         if self.excepcion is not None:
@@ -109,6 +111,31 @@ class _CrearDriveSyncEspia:
 
     def __call__(self, *, staging_dir=None, state_path=None):
         self.llamadas.append({"staging_dir": staging_dir, "state_path": state_path})
+        if self.excepcion is not None:
+            raise self.excepcion
+        return self.resultado
+
+
+class _DocumentStoreInstanciaFake:
+    """Objeto devuelto por `crear_document_store_fn` en los tests — solo
+    necesita ser identificable (`is`) para verificar que `main()` lo reenvía
+    tal cual a `run_pipeline_fn`."""
+
+
+class _CrearDocumentStoreEspia:
+    """Doble de `DocumentStore` (o de cualquier `crear_document_store_fn`
+    inyectado): registra cuántas veces se llamó (sin argumentos, mismo patrón
+    que `_crear_store_por_defecto`) y devuelve una instancia fija, o lanza
+    `excepcion` (simula `DocumentStoreError` por falta de
+    `SUPABASE_URL`/`SUPABASE_SERVICE_KEY`)."""
+
+    def __init__(self, resultado=None, excepcion=None):
+        self.resultado = resultado if resultado is not None else _DocumentStoreInstanciaFake()
+        self.excepcion = excepcion
+        self.llamadas = 0
+
+    def __call__(self):
+        self.llamadas += 1
         if self.excepcion is not None:
             raise self.excepcion
         return self.resultado
@@ -472,3 +499,133 @@ def test_sync_drive_fallo_de_configuracion_devuelve_exit_code_3(capsys):
     resumen = json.loads(salida.out)
     assert "DRIVE_FOLDER_ID" in resumen["error_fatal"]
     assert "DRIVE_FOLDER_ID" in salida.err
+
+
+# ---------------------------------------------------------------------------
+# main() — --capturar-bronze / --sin-captura-bronze (task 59, P25)
+#
+# Contrato: activación asimétrica (ver docstring del módulo, §--capturar-bronze
+# / --sin-captura-bronze). Sin --sync-drive: la captura va apagada por
+# defecto, --capturar-bronze la enciende. Con --sync-drive: la captura va
+# encendida por defecto, --sin-captura-bronze la apaga (y deja
+# bronze.omitida=true en el resumen). Un fallo de crear_document_store_fn
+# (p.ej. DocumentStoreError por falta de SUPABASE_URL/SUPABASE_SERVICE_KEY)
+# reutiliza el exit code 3 ya existente, igual que --sync-drive.
+# ---------------------------------------------------------------------------
+
+
+def test_sin_flags_no_llama_a_crear_document_store_fn_y_bronze_no_activada(capsys):
+    run_espia = _RunPipelineEspia(resultado=ResultadoPipeline())
+    doc_store_espia = _CrearDocumentStoreEspia()
+
+    codigo = main([], run_pipeline_fn=run_espia, crear_document_store_fn=doc_store_espia)
+    salida = capsys.readouterr()
+
+    assert codigo == 0
+    assert doc_store_espia.llamadas == 0
+    assert run_espia.llamadas[0]["document_store"] is None
+    resumen = json.loads(salida.out)
+    assert resumen["bronze"] == {"activada": False}
+
+
+def test_capturar_bronze_sin_sync_drive_activa_la_captura(capsys):
+    run_espia = _RunPipelineEspia(resultado=ResultadoPipeline())
+    instancia = _DocumentStoreInstanciaFake()
+    doc_store_espia = _CrearDocumentStoreEspia(resultado=instancia)
+
+    codigo = main(
+        ["--capturar-bronze"],
+        run_pipeline_fn=run_espia,
+        crear_document_store_fn=doc_store_espia,
+    )
+    salida = capsys.readouterr()
+
+    assert codigo == 0
+    assert doc_store_espia.llamadas == 1
+    assert run_espia.llamadas[0]["document_store"] is instancia
+    resumen = json.loads(salida.out)
+    assert resumen["bronze"] == {"activada": True}
+
+
+def test_sync_drive_activa_la_captura_por_defecto_sin_pedirla_explicitamente(capsys):
+    run_espia = _RunPipelineEspia(resultado=ResultadoPipeline())
+    drive_espia = _CrearDriveSyncEspia()
+    instancia = _DocumentStoreInstanciaFake()
+    doc_store_espia = _CrearDocumentStoreEspia(resultado=instancia)
+
+    codigo = main(
+        ["--sync-drive"],
+        run_pipeline_fn=run_espia,
+        crear_drive_sync_fn=drive_espia,
+        crear_document_store_fn=doc_store_espia,
+    )
+    salida = capsys.readouterr()
+
+    assert codigo == 0
+    assert doc_store_espia.llamadas == 1
+    assert run_espia.llamadas[0]["document_store"] is instancia
+    resumen = json.loads(salida.out)
+    assert resumen["bronze"] == {"activada": True}
+
+
+def test_sync_drive_con_sin_captura_bronze_desactiva_la_captura_y_lo_marca_omitida(capsys):
+    run_espia = _RunPipelineEspia(resultado=ResultadoPipeline())
+    drive_espia = _CrearDriveSyncEspia()
+    doc_store_espia = _CrearDocumentStoreEspia()
+
+    codigo = main(
+        ["--sync-drive", "--sin-captura-bronze"],
+        run_pipeline_fn=run_espia,
+        crear_drive_sync_fn=drive_espia,
+        crear_document_store_fn=doc_store_espia,
+    )
+    salida = capsys.readouterr()
+
+    assert codigo == 0
+    assert doc_store_espia.llamadas == 0
+    assert run_espia.llamadas[0]["document_store"] is None
+    resumen = json.loads(salida.out)
+    assert resumen["bronze"] == {"activada": False, "omitida": True}
+
+
+def test_sin_captura_bronze_sin_sync_drive_no_tiene_efecto(capsys):
+    """`--sin-captura-bronze` sin `--sync-drive` no marca `omitida` — ese
+    flag solo aplica cuando la captura iba a estar activa por defecto (ver
+    docstring del módulo)."""
+    run_espia = _RunPipelineEspia(resultado=ResultadoPipeline())
+    doc_store_espia = _CrearDocumentStoreEspia()
+
+    codigo = main(
+        ["--sin-captura-bronze"],
+        run_pipeline_fn=run_espia,
+        crear_document_store_fn=doc_store_espia,
+    )
+    salida = capsys.readouterr()
+
+    assert codigo == 0
+    assert doc_store_espia.llamadas == 0
+    resumen = json.loads(salida.out)
+    assert resumen["bronze"] == {"activada": False}
+
+
+def test_capturar_bronze_fallo_de_configuracion_devuelve_exit_code_3(capsys):
+    run_espia = _RunPipelineEspia(resultado=ResultadoPipeline())
+    doc_store_espia = _CrearDocumentStoreEspia(
+        excepcion=RuntimeError(
+            "SUPABASE_URL / SUPABASE_SERVICE_KEY no configuradas en el entorno (.env)."
+        )
+    )
+
+    codigo = main(
+        ["--capturar-bronze"],
+        run_pipeline_fn=run_espia,
+        crear_document_store_fn=doc_store_espia,
+    )
+    salida = capsys.readouterr()
+
+    assert codigo == 3
+    # El fallo ocurre construyendo el document_store, ANTES de invocar run_pipeline_fn.
+    assert run_espia.llamadas == []
+    resumen = json.loads(salida.out)
+    assert "SUPABASE_URL" in resumen["error_fatal"]
+    assert "SUPABASE_URL" in salida.err
