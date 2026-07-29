@@ -12,9 +12,11 @@ import pytest
 from src.jokes.supabase_store import (
     ESTADOS_CANDIDATO_TAXONOMIA,
     ESTADOS_CHISTE,
+    SCHEMA_MODE_DEFAULT,
     TIPOS_CANDIDATO_TAXONOMIA,
     TIPOS_FUENTE_CHISTE,
     SupabaseStore,
+    _SCHEMA_TABLAS,
     _build_candidato_payload,
     _build_candidato_update_payload,
     _build_chiste_payload,
@@ -24,6 +26,8 @@ from src.jokes.supabase_store import (
     _build_revision_payload,
     _normalizar_tipo_fuente_candidatos,
     _parsear_embedding,
+    _schema_mode,
+    _tabla,
     _validar_estado_candidato,
     _validar_estado_chiste,
     _validar_tipo_candidato,
@@ -728,3 +732,229 @@ def test_listar_telegram_bronze_pendientes_sin_pendientes_devuelve_lista_vacia()
     store = SupabaseStore(client=_FakeClienteBronzePendientes(filas))
 
     assert store.listar_telegram_bronze_pendientes() == []
+
+
+# ---------------------------------------------------------------------------
+# Acceso por schema (task 54, `src/jokes/SPEC.md` §"Acceso por schema con
+# supabase-py") — `_tabla()` es el único punto de resolución tabla -> builder
+# PostgREST. Estos tests verifican, para CADA método de `SupabaseStore`:
+#   1. en modo por defecto (`SUPABASE_SCHEMA_MODE` no fijada / "public"),
+#      invoca EXACTAMENTE `client.table(nombre_logico)` — cero `.schema(...)`
+#      de por medio, el criterio duro de "sin cambio de comportamiento
+#      observable" de la propia task;
+#   2. en modo "p25" (env var fijada, simula el cutover post-tasks 55/56),
+#      invoca `client.schema(schema).table(tabla)` con el schema/tabla exacto
+#      del contrato de `SPEC.md` (tabla método -> schema -> tabla).
+#
+# Usa un doble de cliente genérico (`_RecordingClient`) que solo REGISTRA la
+# llamada a `.table`/`.schema(...).table`, sin validar payload — el payload
+# ya está cubierto arriba por los tests de `_build_*_payload` y por los
+# dobles de cliente más estrictos (`_FakeClienteChistes`, `_FakeClienteBronze`,
+# etc.), que además siguen pasando sin tocarlos: la prueba viviente de que el
+# modo por defecto no cambió el call site.
+# ---------------------------------------------------------------------------
+
+class _RecordingResultado:
+    def __init__(self, data):
+        self.data = data
+
+
+class _RecordingQuery:
+    """Doble fluido genérico: acepta cualquier método de la cadena PostgREST
+    (`select`/`insert`/`update`/`upsert`/`eq`/`in_`/`is_`/`order`) sin
+    validar argumentos y siempre se devuelve a sí mismo, hasta `.execute()`.
+    """
+
+    def select(self, *args, **kwargs):
+        return self
+
+    def insert(self, *args, **kwargs):
+        return self
+
+    def update(self, *args, **kwargs):
+        return self
+
+    def upsert(self, *args, **kwargs):
+        return self
+
+    def eq(self, *args, **kwargs):
+        return self
+
+    def in_(self, *args, **kwargs):
+        return self
+
+    def is_(self, *args, **kwargs):
+        return self
+
+    def order(self, *args, **kwargs):
+        return self
+
+    def execute(self):
+        # Una fila con todas las claves que cualquier método de
+        # SupabaseStore pueda leer del resultado (id, hash_normalizado,
+        # embedding, texto_raw) — estos tests no verifican el payload de
+        # vuelta, solo qué tabla/schema se invocó.
+        return _RecordingResultado(
+            [{"id": "x", "hash_normalizado": "h", "embedding": None, "texto_raw": "t"}]
+        )
+
+
+class _RecordingSchema:
+    def __init__(self, client, nombre_schema):
+        self._client = client
+        self._nombre_schema = nombre_schema
+
+    def table(self, nombre_tabla):
+        self._client.llamadas.append({"schema": self._nombre_schema, "tabla": nombre_tabla})
+        return _RecordingQuery()
+
+
+class _RecordingClient:
+    """Doble de cliente que registra cada `.table(...)` /
+    `.schema(...).table(...)` invocado, en orden — usado para verificar el
+    contrato schema/tabla de cada método de `SupabaseStore` (task 54)."""
+
+    def __init__(self):
+        self.llamadas: list[dict] = []
+
+    def table(self, nombre_tabla):
+        self.llamadas.append({"schema": None, "tabla": nombre_tabla})
+        return _RecordingQuery()
+
+    def schema(self, nombre_schema):
+        return _RecordingSchema(self, nombre_schema)
+
+
+def test_schema_mode_default_es_public():
+    """Restricción dura de la task 54: el valor por defecto sigue apuntando
+    a `public` hasta el cutover (tasks 55/56)."""
+    assert SCHEMA_MODE_DEFAULT == "public"
+
+
+def test_schema_mode_lee_env_var(monkeypatch):
+    monkeypatch.delenv("SUPABASE_SCHEMA_MODE", raising=False)
+    assert _schema_mode() == "public"
+
+    monkeypatch.setenv("SUPABASE_SCHEMA_MODE", "p25")
+    assert _schema_mode() == "p25"
+
+
+def test_schema_tablas_coincide_con_contrato_de_spec():
+    """`_SCHEMA_TABLAS` es exactamente la tabla método -> schema -> tabla que
+    fija `src/jokes/SPEC.md` §"Acceso por schema con supabase-py"."""
+    assert _SCHEMA_TABLAS == {
+        "chistes": ("silver", "chistes"),
+        "chistes_revisiones": ("silver", "chistes_revisiones"),
+        "temas": ("silver", "temas"),
+        "tecnicas": ("silver", "tecnicas"),
+        "fuentes": ("silver", "fuentes"),
+        "candidatos_taxonomia": ("silver", "candidatos_taxonomia"),
+        "chistes_telegram_bronze": ("bronze", "chistes_telegram"),
+    }
+
+
+def test_tabla_modo_public_no_antepone_schema(monkeypatch):
+    monkeypatch.delenv("SUPABASE_SCHEMA_MODE", raising=False)
+    client = _RecordingClient()
+
+    _tabla(client, "chistes")
+
+    assert client.llamadas == [{"schema": None, "tabla": "chistes"}]
+
+
+def test_tabla_modo_p25_antepone_schema_segun_contrato(monkeypatch):
+    monkeypatch.setenv("SUPABASE_SCHEMA_MODE", "p25")
+    client = _RecordingClient()
+
+    _tabla(client, "chistes_telegram_bronze")
+
+    assert client.llamadas == [{"schema": "bronze", "tabla": "chistes_telegram"}]
+
+
+# Nombre lógico de tabla (clave de `_SCHEMA_TABLAS`) esperado por método —
+# mismo mapeo que la tabla de `SPEC.md`.
+_TABLA_LOGICA_POR_METODO = {
+    "crear_chiste": "chistes",
+    "obtener_chiste": "chistes",
+    "actualizar_chiste": "chistes",
+    "listar_candidatos_reconciliacion": "chistes",
+    "crear_revision": "chistes_revisiones",
+    "listar_revisiones": "chistes_revisiones",
+    "listar_temas": "temas",
+    "crear_tema": "temas",
+    "listar_tecnicas": "tecnicas",
+    "crear_tecnica": "tecnicas",
+    "listar_fuentes": "fuentes",
+    "crear_fuente": "fuentes",
+    "crear_candidato_taxonomia": "candidatos_taxonomia",
+    "listar_candidatos_taxonomia": "candidatos_taxonomia",
+    "actualizar_candidato_taxonomia": "candidatos_taxonomia",
+    "guardar_mensaje_telegram_bronze": "chistes_telegram_bronze",
+    "marcar_telegram_bronze_procesado": "chistes_telegram_bronze",
+    "listar_telegram_bronze_pendientes": "chistes_telegram_bronze",
+}
+
+# Cómo invocar cada método con argumentos mínimos válidos (solo para
+# ejercitar el call site — el payload/resultado no se verifica aquí).
+_INVOCACIONES = {
+    "crear_chiste": lambda store: store.crear_chiste(
+        texto_normalizado="t", hash_normalizado="h", tipo_fuente="propio"
+    ),
+    "obtener_chiste": lambda store: store.obtener_chiste("id-1"),
+    "actualizar_chiste": lambda store: store.actualizar_chiste("id-1", estado="rematado"),
+    "listar_candidatos_reconciliacion": lambda store: store.listar_candidatos_reconciliacion("propio"),
+    "crear_revision": lambda store: store.crear_revision(chiste_id="id-1", version=1, contenido="c"),
+    "listar_revisiones": lambda store: store.listar_revisiones("id-1"),
+    "listar_temas": lambda store: store.listar_temas(),
+    "crear_tema": lambda store: store.crear_tema("nombre"),
+    "listar_tecnicas": lambda store: store.listar_tecnicas(),
+    "crear_tecnica": lambda store: store.crear_tecnica("nombre"),
+    "listar_fuentes": lambda store: store.listar_fuentes(),
+    "crear_fuente": lambda store: store.crear_fuente("nombre"),
+    "crear_candidato_taxonomia": lambda store: store.crear_candidato_taxonomia(tipo="tema", texto="x"),
+    "listar_candidatos_taxonomia": lambda store: store.listar_candidatos_taxonomia(),
+    "actualizar_candidato_taxonomia": lambda store: store.actualizar_candidato_taxonomia(1, "aceptado"),
+    "guardar_mensaje_telegram_bronze": lambda store: store.guardar_mensaje_telegram_bronze(
+        telegram_update_id=1, texto_raw="x"
+    ),
+    "marcar_telegram_bronze_procesado": lambda store: store.marcar_telegram_bronze_procesado(1),
+    "listar_telegram_bronze_pendientes": lambda store: store.listar_telegram_bronze_pendientes(),
+}
+
+assert set(_INVOCACIONES) == set(_TABLA_LOGICA_POR_METODO), (
+    "cada método cubierto por el contrato de schema debe tener también su "
+    "invocación mínima — lista desincronizada"
+)
+
+
+@pytest.mark.parametrize("nombre_metodo", sorted(_TABLA_LOGICA_POR_METODO))
+def test_metodo_usa_tabla_publica_sin_schema_por_defecto(nombre_metodo, monkeypatch):
+    """Con `SUPABASE_SCHEMA_MODE` no fijada (default `"public"`), cada método
+    invoca `client.table(nombre_logico)` — nunca `client.schema(...)` — el
+    mismo call site que existía antes de la task 54."""
+    monkeypatch.delenv("SUPABASE_SCHEMA_MODE", raising=False)
+    client = _RecordingClient()
+    store = SupabaseStore(client=client)
+
+    _INVOCACIONES[nombre_metodo](store)
+
+    assert client.llamadas[-1] == {
+        "schema": None,
+        "tabla": _TABLA_LOGICA_POR_METODO[nombre_metodo],
+    }
+
+
+@pytest.mark.parametrize("nombre_metodo", sorted(_TABLA_LOGICA_POR_METODO))
+def test_metodo_usa_schema_del_contrato_tras_cutover(nombre_metodo, monkeypatch):
+    """Con `SUPABASE_SCHEMA_MODE=p25` (simula el cutover de las tasks 55/56),
+    cada método invoca `client.schema(schema).table(tabla)` con el par exacto
+    que fija `SPEC.md` §"Acceso por schema con supabase-py"."""
+    monkeypatch.setenv("SUPABASE_SCHEMA_MODE", "p25")
+    client = _RecordingClient()
+    store = SupabaseStore(client=client)
+
+    _INVOCACIONES[nombre_metodo](store)
+
+    nombre_logico = _TABLA_LOGICA_POR_METODO[nombre_metodo]
+    schema, tabla = _SCHEMA_TABLAS[nombre_logico]
+    assert client.llamadas[-1] == {"schema": schema, "tabla": tabla}

@@ -23,6 +23,15 @@ la construcción de payloads vive en funciones puras
 `tests/unit/theory/test_teoria_store.py`. La clase `TeoriaStore` es una capa
 fina sobre `supabase-py`, testeada de verdad (sin mocks frágiles de la
 librería) en `tests/integration/test_ingest_teoria_live.py`.
+
+Acceso por schema (task 54, `src/jokes/SPEC.md` §"Acceso por schema con
+supabase-py"): mismo mecanismo que `supabase_store.py`, duplicado aquí (no
+importado, ver más arriba) — `_tabla(self.client, nombre_logico)` en vez de
+`self.client.table(...)` directo, según el modo activo (env
+`SUPABASE_SCHEMA_MODE`, default `SCHEMA_MODE_DEFAULT = "public"` — sin
+`.schema(...)` de por medio, cero cambio de comportamiento observable) o
+`_SCHEMA_TABLAS` (mapeo `teoria_chunks` -> `gold`, `fuentes` -> `silver`) tras
+el flip de producción de las tasks 55/56.
 """
 from __future__ import annotations
 
@@ -37,6 +46,57 @@ load_dotenv()
 
 class TeoriaStoreError(RuntimeError):
     """Error del cliente de acceso a Supabase para teoría (config ausente, payload inválido)."""
+
+
+# ---------------------------------------------------------------------------
+# Acceso por schema (task 54, `src/jokes/SPEC.md` §"Acceso por schema con
+# supabase-py" — el contrato es el mismo para `teoria_store.py`, aunque este
+# módulo no importa nada de `src/jokes/` (regla dura de `CLAUDE.md`), así que
+# el mecanismo se DUPLICA aquí en vez de compartirse, mismo criterio ya
+# aplicado a `crear_cliente`/credenciales en este fichero).
+#
+# Modo activo vía env `SUPABASE_SCHEMA_MODE` (misma variable que
+# `src/jokes/supabase_store.py` — un único proyecto Supabase compartido por
+# todo el pipeline, coherente con el flip de las tasks 55/56 que activa el
+# cutover para ambos módulos a la vez). Dos valores válidos:
+#   - "public" (default): pre-cutover. Resuelve a EXACTAMENTE
+#     `client.table(nombre_logico)` — mismo call site que antes de este
+#     refactor, cero `.schema(...)` de por medio. Garantiza "sin cambio de
+#     comportamiento observable" (criterio de la task 54).
+#   - "p25": post-cutover (tasks 55/56). Resuelve a
+#     `client.schema(schema).table(tabla)` según `_SCHEMA_TABLAS`.
+# ---------------------------------------------------------------------------
+
+SCHEMA_MODE_DEFAULT = "public"
+
+# nombre_logico -> (schema, tabla) una vez aplicado el cutover P25.
+# `teoria_chunks` pasa a `gold` (`src/jokes/SPEC.md` §Storage); `fuentes` es
+# la misma tabla compartida que usa `src/jokes/supabase_store.py`, en
+# `silver`.
+_SCHEMA_TABLAS: dict[str, tuple[str, str]] = {
+    "teoria_chunks": ("gold", "teoria_chunks"),
+    "fuentes": ("silver", "fuentes"),
+}
+
+
+def _schema_mode() -> str:
+    """Modo de schema activo — lee `SUPABASE_SCHEMA_MODE` del entorno en cada
+    llamada (no en import) para que un test pueda cambiarlo con
+    `monkeypatch.setenv` sin recargar el módulo."""
+    return os.environ.get("SUPABASE_SCHEMA_MODE", SCHEMA_MODE_DEFAULT)
+
+
+def _tabla(client: Any, nombre_logico: str) -> Any:
+    """Punto único de resolución tabla -> builder PostgREST (§Storage).
+
+    En modo `"public"` (default) es `client.table(nombre_logico)` sin más —
+    idéntico al call site que existía antes de la task 54. En cualquier otro
+    modo antepone `.schema(...)` resuelto vía `_SCHEMA_TABLAS`.
+    """
+    if _schema_mode() == "public":
+        return client.table(nombre_logico)
+    schema, tabla = _SCHEMA_TABLAS[nombre_logico]
+    return client.schema(schema).table(tabla)
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +190,7 @@ class TeoriaStore:
         """
         payload = _build_chunk_payload(**kwargs)
         resultado = (
-            self.client.table("teoria_chunks")
+            _tabla(self.client, "teoria_chunks")
             .upsert(payload, on_conflict="doc_id,version_corpus,chunk_index", ignore_duplicates=True)
             .execute()
         )
@@ -150,7 +210,7 @@ class TeoriaStore:
         fila con el mismo nombre, se queda con la primera (determinista por
         orden de Supabase, no relevante en la práctica para este volumen).
         """
-        resultado = self.client.table("fuentes").select("id").eq("nombre", nombre).execute()
+        resultado = _tabla(self.client, "fuentes").select("id").eq("nombre", nombre).execute()
         if resultado.data:
             return resultado.data[0]["id"]
 
@@ -159,5 +219,5 @@ class TeoriaStore:
             payload["tipo_fuente"] = tipo_fuente
         if licencia is not None:
             payload["licencia"] = licencia
-        creado = self.client.table("fuentes").insert(payload).execute()
+        creado = _tabla(self.client, "fuentes").insert(payload).execute()
         return creado.data[0]["id"]
