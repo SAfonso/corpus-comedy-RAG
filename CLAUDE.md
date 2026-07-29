@@ -56,6 +56,12 @@ Al resolver un error que **no** estaba documentado, **añade una entrada** al
 `KNOWN_ERRORS.md` correspondiente (del módulo, o el global si cruza módulos)
 antes de dar la tarea por terminada — formato fijo en la cabecera de cada fichero.
 
+Antes de intentar un paso contra Supabase (DDL, Storage, Dashboard) o el VPS
+de producción por API/CLI, **consulta `progress/limitaciones_entorno.md`** —
+no son errores de código, son capacidades que el agente no tiene en este
+entorno (credenciales/tipo de acceso ausente) y que ya se descubrieron antes;
+si el paso está ahí, pide al usuario que lo ejecute en vez de reintentar.
+
 ## Metodología: SDD + TDD
 1. Lee el `SPEC.md` del módulo (tabla de arriba) antes de implementar.
 2. Escribe tests primero con fixtures reales de `/tests/fixtures/` (nunca inventados).
