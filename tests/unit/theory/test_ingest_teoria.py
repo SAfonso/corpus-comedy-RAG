@@ -1,108 +1,79 @@
 """Tests unitarios de `src/theory/ingest_teoria.py` — sin red (`store`/embeddings dobles).
 
-Contrato (task 21, `src/theory/SPEC.md` §Storage): reusa la cadena real
-`parse_whisperx_transcript -> detect_subtypes -> clean_fragments ->
-normalize_language -> generar_version` (mismo patrón que
-`test_format_normalizer.py`, sobre `tests/fixtures/sample_transcript.txt`)
-para producir una `v{N}/` REAL en `tmp_path` — nunca se inventa a mano un
-`manifest.json`/`.txt`, se genera con el código de producción real de la
-task 11, así la ingesta se testea contra el formato de verdad.
-
-Ni `TeoriaStore` ni `generar_embedding` se llaman de verdad aquí: `store` es
-un doble en memoria y `generar_embedding_fn` es una función fake — la
-llamada real de embeddings se cubre en
+Contrato (task 61, `src/theory/SPEC.md` §"Puntos de enganche exactos en
+código (tasks 60 y 61)" §Task 61): la unidad de trabajo es una fila de
+`silver.teoria_documentos` (no ya un `v{N}/` con `manifest.json`), así que
+`store` (doble en memoria, `_FakeTeoriaStore`) expone
+`listar_documentos_pendientes`/`descargar_documento` además de
+`buscar_o_crear_fuente`/`guardar_chunk`. `generar_embedding_fn` sigue siendo
+una función fake — la llamada real de embeddings se cubre en
 `tests/integration/test_ingest_teoria_live.py`.
-"""
-from pathlib import Path
 
+`_separar_cuerpo` se testea aquí igual que antes de la task 61 (es pura, no
+cambió ni una línea) contra un `.md` con el mismo formato que produce
+`format_normalizer.render_document` (mismo delimitador `\\n---\\n` de cierre
+de cabecera YAML que ya usaba el `.txt` de `v{N}/`, ver `src/theory/SPEC.md`
+§Task 60).
+"""
 import pytest
 
-from src.theory.cleaners.transcript_cleaner import clean_fragments
-from src.theory.detectors.subtype_detector import detect_subtypes
 from src.theory.ingest_teoria import (
     IngestaTeoriaError,
     ResultadoIngesta,
-    _descubrir_ultima_version,
     _separar_cuerpo,
-    ingestar_version,
+    ingestar_documentos_pendientes,
 )
-from src.theory.normalizers.format_normalizer import DocumentoEntrada, generar_version
-from src.theory.normalizers.language_normalizer import normalize_language
-from src.theory.parsers.whisperx_parser import parse_whisperx_transcript
 
-FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
-SAMPLE_TXT = FIXTURES_DIR / "sample_transcript.txt"
-
-FUENTE_FIXTURE = "Curso de stand-up (fixture WhisperX)"
+FUENTE_FIXTURE = "Curso de stand-up (fixture Silver)"
 TIPO_FUENTE_FIXTURE = "transcripcion_curso"
 LICENCIA_FIXTURE = "personal_only"
 
-
-def _traductor_no_op(texto: str, idioma_origen: str) -> str:
-    raise AssertionError("no debería traducirse: el fixture ya está en español")
-
-
-def _generar_v1_real(tmp_path: Path) -> Path:
-    """Genera una `v1/` real (código de producción, no inventado) en `tmp_path`."""
-    texto = parse_whisperx_transcript(SAMPLE_TXT).texto
-    fragmentos_subtipo = detect_subtypes(texto)
-    fragmentos_limpios = clean_fragments(fragmentos_subtipo)
-    fragmentos = normalize_language(fragmentos_limpios, traductor=_traductor_no_op)
-
-    documento = DocumentoEntrada(
-        fragmentos=fragmentos,
-        fuente=FUENTE_FIXTURE,
-        tipo_fuente=TIPO_FUENTE_FIXTURE,
-        autor=None,
-        licencia=LICENCIA_FIXTURE,
-    )
-    directorio_base = tmp_path / "processed"
-    generar_version([documento], directorio_base)
-    return directorio_base
+_MD_DOS_FRAGMENTOS = (
+    "---\n"
+    "fuente: Curso de stand-up (fixture Silver)\n"
+    "tipo_fuente: transcripcion_curso\n"
+    "---\n"
+    "\n"
+    "Primer fragmento de teoria.\n"
+    "\n"
+    "Segundo fragmento, distinto del primero.\n"
+)
 
 
-# ---------------------------------------------------------------------------
-# _descubrir_ultima_version
-# ---------------------------------------------------------------------------
-
-class TestDescubrirUltimaVersion:
-    def test_encuentra_la_unica_version_finalizada(self, tmp_path):
-        directorio_base = _generar_v1_real(tmp_path)
-        assert _descubrir_ultima_version(directorio_base) == 1
-
-    def test_se_queda_con_la_mayor_de_varias_finalizadas(self, tmp_path):
-        directorio_base = _generar_v1_real(tmp_path)
-        # Segunda versión real (v2), mismo documento, vía el código real.
-        texto = parse_whisperx_transcript(SAMPLE_TXT).texto
-        fragmentos = normalize_language(
-            clean_fragments(detect_subtypes(texto)), traductor=_traductor_no_op
-        )
-        documento = DocumentoEntrada(
-            fragmentos=fragmentos, fuente=FUENTE_FIXTURE, tipo_fuente=TIPO_FUENTE_FIXTURE
-        )
-        generar_version([documento], directorio_base)
-
-        assert _descubrir_ultima_version(directorio_base) == 2
-
-    def test_directorio_sin_versiones_finalizadas_lanza_error(self, tmp_path):
-        with pytest.raises(IngestaTeoriaError):
-            _descubrir_ultima_version(tmp_path / "no-existe")
+def _fila_silver(
+    *,
+    id_="doc-1",
+    bucket="silver-teoria",
+    object_path="local_legacy/hash1/doc.md",
+    hash_md5="hash1",
+    fuente=FUENTE_FIXTURE,
+    tipo_fuente=TIPO_FUENTE_FIXTURE,
+    licencia=LICENCIA_FIXTURE,
+) -> dict:
+    return {
+        "id": id_,
+        "bucket": bucket,
+        "object_path": object_path,
+        "hash_md5": hash_md5,
+        "fuente": fuente,
+        "tipo_fuente": tipo_fuente,
+        "licencia": licencia,
+    }
 
 
 # ---------------------------------------------------------------------------
-# _separar_cuerpo
+# _separar_cuerpo — pura, sin cambios respecto a antes de la task 61.
 # ---------------------------------------------------------------------------
+
 
 class TestSepararCuerpo:
-    def test_recupera_los_textos_de_fragmento_en_orden(self, tmp_path):
-        directorio_base = _generar_v1_real(tmp_path)
-        ruta_txt = next((directorio_base / "v1" / "documents").glob("*.txt"))
-        texto_documento = ruta_txt.read_text(encoding="utf-8")
+    def test_recupera_los_textos_de_fragmento_en_orden(self):
+        fragmentos_texto = _separar_cuerpo(_MD_DOS_FRAGMENTOS)
 
-        fragmentos_texto = _separar_cuerpo(texto_documento)
-
-        assert len(fragmentos_texto) >= 1
-        assert all(isinstance(f, str) and f.strip() for f in fragmentos_texto)
+        assert fragmentos_texto == [
+            "Primer fragmento de teoria.",
+            "Segundo fragmento, distinto del primero.",
+        ]
 
     def test_documento_sin_delimitador_de_cierre_lanza_error(self):
         with pytest.raises(IngestaTeoriaError):
@@ -110,14 +81,31 @@ class TestSepararCuerpo:
 
 
 # ---------------------------------------------------------------------------
-# ingestar_version — orquestación con store/embeddings dobles, sin red.
+# ingestar_documentos_pendientes — orquestación con store/embeddings dobles.
 # ---------------------------------------------------------------------------
 
+
 class _FakeTeoriaStore:
-    def __init__(self):
+    """Doble en memoria de `TeoriaStore` (task 61): además de
+    `buscar_o_crear_fuente`/`guardar_chunk`, expone
+    `listar_documentos_pendientes`/`descargar_documento` para no depender de
+    disco ni de Supabase real."""
+
+    def __init__(self, filas_silver: list[dict], contenidos: dict[str, bytes]):
+        self._filas_silver = filas_silver
+        self._contenidos = contenidos  # object_path -> bytes del .md
         self.chunks_guardados: dict[tuple, dict] = {}
         self.fuentes: dict[str, int] = {}
         self._siguiente_fuente_id = 1
+
+    def listar_documentos_pendientes(self) -> list[dict]:
+        doc_ids_con_chunks = {clave[0] for clave in self.chunks_guardados}
+        return [
+            fila for fila in self._filas_silver if str(fila["id"]) not in doc_ids_con_chunks
+        ]
+
+    def descargar_documento(self, bucket: str, object_path: str) -> bytes:
+        return self._contenidos[object_path]
 
     def buscar_o_crear_fuente(self, nombre, *, tipo_fuente=None, licencia=None):
         if nombre not in self.fuentes:
@@ -125,7 +113,9 @@ class _FakeTeoriaStore:
             self._siguiente_fuente_id += 1
         return self.fuentes[nombre]
 
-    def guardar_chunk(self, *, doc_id, version_corpus, chunk_index, contenido, embedding, tipo_fuente, fuente_id, licencia):
+    def guardar_chunk(
+        self, *, doc_id, version_corpus, chunk_index, contenido, embedding, tipo_fuente, fuente_id, licencia
+    ):
         clave = (doc_id, version_corpus, chunk_index)
         if clave in self.chunks_guardados:
             return None
@@ -147,80 +137,118 @@ def _embedding_fake(texto: str) -> list:
     return [float(len(texto)), 0.0, 0.0]
 
 
-class TestIngestarVersion:
-    def test_ingesta_todos_los_fragmentos_del_documento(self, tmp_path):
-        directorio_base = _generar_v1_real(tmp_path)
-        store = _FakeTeoriaStore()
+def _store_con_un_documento() -> _FakeTeoriaStore:
+    fila = _fila_silver()
+    return _FakeTeoriaStore(
+        filas_silver=[fila],
+        contenidos={fila["object_path"]: _MD_DOS_FRAGMENTOS.encode("utf-8")},
+    )
 
-        resultado = ingestar_version(directorio_base, store, generar_embedding_fn=_embedding_fake)
+
+class TestIngestarDocumentosPendientes:
+    def test_ingesta_todos_los_fragmentos_del_documento(self):
+        store = _store_con_un_documento()
+
+        resultado = ingestar_documentos_pendientes(store, generar_embedding_fn=_embedding_fake)
 
         assert isinstance(resultado, ResultadoIngesta)
-        assert resultado.version_corpus == "v1"
+        assert resultado.num_documentos == 1
         assert resultado.num_duplicados == 0
         assert resultado.num_nuevos == len(store.chunks_guardados)
-        assert resultado.num_nuevos > 0
+        assert resultado.num_nuevos == 2
 
-    def test_reingestar_la_misma_version_es_idempotente(self, tmp_path):
-        directorio_base = _generar_v1_real(tmp_path)
-        store = _FakeTeoriaStore()
+    def test_doc_id_y_version_corpus_reexpresan_id_y_hash_md5_de_la_fila_silver(self):
+        store = _store_con_un_documento()
 
-        ingestar_version(directorio_base, store, generar_embedding_fn=_embedding_fake)
-        resultado_repetido = ingestar_version(
-            directorio_base, store, generar_embedding_fn=_embedding_fake
-        )
+        ingestar_documentos_pendientes(store, generar_embedding_fn=_embedding_fake)
 
-        assert resultado_repetido.num_nuevos == 0
-        assert resultado_repetido.num_duplicados == len(store.chunks_guardados)
+        claves = set(store.chunks_guardados)
+        assert claves == {("doc-1", "hash1", 0), ("doc-1", "hash1", 1)}
+        for chunk in store.chunks_guardados.values():
+            assert chunk["doc_id"] == "doc-1"
+            assert chunk["version_corpus"] == "hash1"
 
-    def test_resuelve_fuente_una_sola_vez_por_documento(self, tmp_path):
-        directorio_base = _generar_v1_real(tmp_path)
-        store = _FakeTeoriaStore()
-
-        ingestar_version(directorio_base, store, generar_embedding_fn=_embedding_fake)
-
-        assert store.fuentes == {FUENTE_FIXTURE: 1}
-        assert all(
-            fila["fuente_id"] == 1 for fila in store.chunks_guardados.values()
-        )
-
-    def test_chunks_llevan_tipo_fuente_y_licencia_del_manifest(self, tmp_path):
-        directorio_base = _generar_v1_real(tmp_path)
-        store = _FakeTeoriaStore()
-
-        ingestar_version(directorio_base, store, generar_embedding_fn=_embedding_fake)
-
-        for fila in store.chunks_guardados.values():
-            assert fila["tipo_fuente"] == TIPO_FUENTE_FIXTURE
-            assert fila["licencia"] == LICENCIA_FIXTURE
-
-    def test_version_explicita_ignora_la_mas_reciente(self, tmp_path):
-        directorio_base = _generar_v1_real(tmp_path)
-        # v2 real, mismo documento.
-        texto = parse_whisperx_transcript(SAMPLE_TXT).texto
-        fragmentos = normalize_language(
-            clean_fragments(detect_subtypes(texto)), traductor=_traductor_no_op
-        )
-        documento = DocumentoEntrada(
-            fragmentos=fragmentos, fuente=FUENTE_FIXTURE, tipo_fuente=TIPO_FUENTE_FIXTURE
-        )
-        generar_version([documento], directorio_base)
-
-        store = _FakeTeoriaStore()
-        resultado = ingestar_version(
-            directorio_base, store, version=1, generar_embedding_fn=_embedding_fake
-        )
-
-        assert resultado.version_corpus == "v1"
-
-    def test_no_llama_dos_veces_al_generador_de_embeddings_por_el_mismo_fragmento(self, tmp_path):
-        directorio_base = _generar_v1_real(tmp_path)
-        store = _FakeTeoriaStore()
+    def test_reingestar_una_fila_ya_ingestada_es_idempotente_y_no_gasta_embedding(self):
+        store = _store_con_un_documento()
         llamadas = []
 
         def espia(texto):
             llamadas.append(texto)
             return _embedding_fake(texto)
 
-        resultado = ingestar_version(directorio_base, store, generar_embedding_fn=espia)
+        ingestar_documentos_pendientes(store, generar_embedding_fn=espia)
+        assert len(llamadas) == 2  # una llamada por fragmento, la primera vez
+
+        # La selección por defecto ("pendientes") ya no encuentra esta fila:
+        # tiene chunks en Gold, así que la segunda llamada no reingesta nada
+        # ni gasta un solo embedding más.
+        resultado_repetido = ingestar_documentos_pendientes(store, generar_embedding_fn=espia)
+
+        assert resultado_repetido.chunks == []
+        assert resultado_repetido.num_nuevos == 0
+        assert resultado_repetido.num_duplicados == 0
+        assert len(llamadas) == 2  # sin llamadas nuevas
+
+    def test_seleccion_por_defecto_excluye_filas_ya_ingestadas_pero_incluye_las_nuevas(self):
+        fila_vieja = _fila_silver(id_="doc-1", object_path="local_legacy/hash1/a.md", hash_md5="hash1")
+        fila_nueva = _fila_silver(id_="doc-2", object_path="local_legacy/hash2/b.md", hash_md5="hash2")
+        store = _FakeTeoriaStore(
+            filas_silver=[fila_vieja, fila_nueva],
+            contenidos={
+                fila_vieja["object_path"]: _MD_DOS_FRAGMENTOS.encode("utf-8"),
+                fila_nueva["object_path"]: _MD_DOS_FRAGMENTOS.encode("utf-8"),
+            },
+        )
+        # doc-1 ya tiene chunks en Gold (simulado a mano, sin pasar por la
+        # función): listar_documentos_pendientes debe seguir excluyéndolo.
+        store.chunks_guardados[("doc-1", "hash1", 0)] = {"doc_id": "doc-1"}
+
+        resultado = ingestar_documentos_pendientes(store, generar_embedding_fn=_embedding_fake)
+
+        assert {c.doc_id for c in resultado.chunks} == {"doc-2"}
+
+    def test_resuelve_fuente_una_sola_vez_por_documento(self):
+        store = _store_con_un_documento()
+
+        ingestar_documentos_pendientes(store, generar_embedding_fn=_embedding_fake)
+
+        assert store.fuentes == {FUENTE_FIXTURE: 1}
+        assert all(fila["fuente_id"] == 1 for fila in store.chunks_guardados.values())
+
+    def test_chunks_llevan_tipo_fuente_y_licencia_de_la_fila_silver(self):
+        store = _store_con_un_documento()
+
+        ingestar_documentos_pendientes(store, generar_embedding_fn=_embedding_fake)
+
+        for fila in store.chunks_guardados.values():
+            assert fila["tipo_fuente"] == TIPO_FUENTE_FIXTURE
+            assert fila["licencia"] == LICENCIA_FIXTURE
+
+    def test_documentos_explicitos_ignora_listar_documentos_pendientes(self):
+        fila_a = _fila_silver(id_="doc-a", object_path="local_legacy/hasha/a.md", hash_md5="hasha")
+        fila_b = _fila_silver(id_="doc-b", object_path="local_legacy/hashb/b.md", hash_md5="hashb")
+        store = _FakeTeoriaStore(
+            filas_silver=[fila_a, fila_b],
+            contenidos={
+                fila_a["object_path"]: _MD_DOS_FRAGMENTOS.encode("utf-8"),
+                fila_b["object_path"]: _MD_DOS_FRAGMENTOS.encode("utf-8"),
+            },
+        )
+
+        resultado = ingestar_documentos_pendientes(
+            store, documentos=[fila_a], generar_embedding_fn=_embedding_fake
+        )
+
+        assert {c.doc_id for c in resultado.chunks} == {"doc-a"}
+
+    def test_no_llama_dos_veces_al_generador_de_embeddings_por_el_mismo_fragmento(self):
+        store = _store_con_un_documento()
+        llamadas = []
+
+        def espia(texto):
+            llamadas.append(texto)
+            return _embedding_fake(texto)
+
+        resultado = ingestar_documentos_pendientes(store, generar_embedding_fn=espia)
 
         assert len(llamadas) == len(resultado.chunks)

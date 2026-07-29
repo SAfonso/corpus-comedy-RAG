@@ -137,10 +137,12 @@ def test_schema_mode_lee_env_var(monkeypatch):
 
 def test_schema_tablas_coincide_con_contrato_de_spec():
     """`_SCHEMA_TABLAS` es exactamente el mapeo que fija `src/jokes/SPEC.md`
-    §"Acceso por schema con supabase-py" para `teoria_chunks`/`fuentes`."""
+    §"Acceso por schema con supabase-py" para `teoria_chunks`/`fuentes`, más
+    `teoria_documentos` (task 61, `silver.teoria_documentos`)."""
     assert _SCHEMA_TABLAS == {
         "teoria_chunks": ("gold", "teoria_chunks"),
         "fuentes": ("silver", "fuentes"),
+        "teoria_documentos": ("silver", "teoria_documentos"),
     }
 
 
@@ -216,3 +218,117 @@ def test_metodo_usa_schema_del_contrato_tras_cutover(nombre_metodo, monkeypatch)
     nombre_logico = _TABLA_LOGICA_POR_METODO[nombre_metodo]
     schema, tabla = _SCHEMA_TABLAS[nombre_logico]
     assert client.llamadas[-1] == {"schema": schema, "tabla": tabla}
+
+
+# ---------------------------------------------------------------------------
+# listar_documentos_pendientes / descargar_documento (task 61, P25) — origen
+# de trabajo de la ingesta desde `silver.teoria_documentos`. Dobles sin red,
+# mismo patrón que `tests/unit/utils/test_document_store.py` (task 58) para
+# `.storage.from_()`.
+# ---------------------------------------------------------------------------
+
+
+class _FakeSelectResultado:
+    def __init__(self, data):
+        self.data = data
+
+
+class _FakeSelectQuery:
+    """Doble mínimo de `client.table(nombre).select(...)`: ignora columnas
+    pedidas y devuelve siempre los datos fijos de esa tabla."""
+
+    def __init__(self, data):
+        self._data = data
+
+    def select(self, *args, **kwargs):
+        return self
+
+    def execute(self):
+        return _FakeSelectResultado(self._data)
+
+
+class _FakeStorageBucket:
+    def __init__(self, contenidos: dict[str, bytes]):
+        self._contenidos = contenidos
+
+    def download(self, object_path: str) -> bytes:
+        return self._contenidos[object_path]
+
+
+class _FakeStorage:
+    def __init__(self, contenidos: dict[str, bytes]):
+        self._contenidos = contenidos
+
+    def from_(self, bucket):
+        return _FakeStorageBucket(self._contenidos)
+
+
+class _FakeClientSilver:
+    """Doble de cliente en modo `"public"` (default): `client.table(nombre)`
+    devuelve datos fijos por tabla lógica, y `client.storage` sirve objetos
+    fijos por `object_path` (sin distinguir bucket, suficiente para el
+    doble)."""
+
+    def __init__(self, datos_por_tabla: dict[str, list], contenidos: dict[str, bytes] = None):
+        self._datos_por_tabla = datos_por_tabla
+        self.storage = _FakeStorage(contenidos or {})
+
+    def table(self, nombre_tabla):
+        return _FakeSelectQuery(self._datos_por_tabla.get(nombre_tabla, []))
+
+
+def test_listar_documentos_pendientes_excluye_filas_con_chunks_en_gold(monkeypatch):
+    monkeypatch.delenv("SUPABASE_SCHEMA_MODE", raising=False)
+    fila_pendiente = {"id": "doc-2", "hash_md5": "hash2"}
+    fila_ya_ingestada = {"id": "doc-1", "hash_md5": "hash1"}
+    client = _FakeClientSilver(
+        datos_por_tabla={
+            "teoria_documentos": [fila_ya_ingestada, fila_pendiente],
+            "teoria_chunks": [{"doc_id": "doc-1"}],
+        }
+    )
+    store = TeoriaStore(client=client)
+
+    pendientes = store.listar_documentos_pendientes()
+
+    assert pendientes == [fila_pendiente]
+
+
+def test_listar_documentos_pendientes_compara_doc_id_como_texto(monkeypatch):
+    """`gold.teoria_chunks.doc_id` es `text` y `silver.teoria_documentos.id`
+    puede venir como `uuid`/objeto no-string del cliente real — la
+    comparación debe hacerse por `str(...)` en ambos lados (ver docstring del
+    método), no fallar por tipos distintos."""
+    monkeypatch.delenv("SUPABASE_SCHEMA_MODE", raising=False)
+    fila_ingestada = {"id": "doc-1", "hash_md5": "hash1"}
+    client = _FakeClientSilver(
+        datos_por_tabla={
+            "teoria_documentos": [fila_ingestada],
+            "teoria_chunks": [{"doc_id": "doc-1"}],
+        }
+    )
+    store = TeoriaStore(client=client)
+
+    assert store.listar_documentos_pendientes() == []
+
+
+def test_listar_documentos_pendientes_sin_chunks_devuelve_todas_las_filas_silver(monkeypatch):
+    monkeypatch.delenv("SUPABASE_SCHEMA_MODE", raising=False)
+    filas = [{"id": "doc-1", "hash_md5": "hash1"}, {"id": "doc-2", "hash_md5": "hash2"}]
+    client = _FakeClientSilver(datos_por_tabla={"teoria_documentos": filas, "teoria_chunks": []})
+    store = TeoriaStore(client=client)
+
+    assert store.listar_documentos_pendientes() == filas
+
+
+def test_descargar_documento_usa_storage_from_bucket_download(monkeypatch):
+    monkeypatch.delenv("SUPABASE_SCHEMA_MODE", raising=False)
+    client = _FakeClientSilver(
+        datos_por_tabla={},
+        contenidos={"local_legacy/hash1/doc.md": b"contenido del documento"},
+    )
+    store = TeoriaStore(client=client)
+
+    contenido = store.descargar_documento("silver-teoria", "local_legacy/hash1/doc.md")
+
+    assert contenido == b"contenido del documento"

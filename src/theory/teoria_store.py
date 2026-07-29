@@ -32,6 +32,23 @@ importado, ver más arriba) — `_tabla(self.client, nombre_logico)` en vez de
 `.schema(...)` de por medio, cero cambio de comportamiento observable) o
 `_SCHEMA_TABLAS` (mapeo `teoria_chunks` -> `gold`, `fuentes` -> `silver`) tras
 el flip de producción de las tasks 55/56.
+
+**Task 61 — lectura de `silver.teoria_documentos`**: `_SCHEMA_TABLAS` gana
+`"teoria_documentos" -> ("silver", "teoria_documentos")`, mismo mecanismo que
+las otras dos entradas — aunque, a diferencia de ellas, esta tabla es
+enteramente nueva de P25 (task 53) y nunca existió en `public`; en modo
+`"public"` resolvería a `client.table("teoria_documentos")`, que no es un
+caso que ocurra en producción real (que ya corre en modo `"p25"` desde la
+task 56), pero `_tabla()` no necesita una rama especial para eso.
+
+`listar_documentos_pendientes()` y `descargar_documento()` son los dos
+puntos de enganche que usa la nueva `ingest_teoria.ingestar_documentos_pendientes`
+(task 61) para dejar de leer `manifest.json` y leer en su lugar filas de
+Silver: la primera decide QUÉ ingestar (filas de `silver.teoria_documentos`
+sin chunks todavía en `gold.teoria_chunks`), la segunda trae el contenido
+del `.md` de cada una desde el bucket privado (`storage.from_(bucket).download(...)`,
+mismo patrón ya testeado sin red para `DocumentStore` en
+`tests/unit/utils/test_document_store.py`, task 58).
 """
 from __future__ import annotations
 
@@ -72,10 +89,12 @@ SCHEMA_MODE_DEFAULT = "public"
 # nombre_logico -> (schema, tabla) una vez aplicado el cutover P25.
 # `teoria_chunks` pasa a `gold` (`src/jokes/SPEC.md` §Storage); `fuentes` es
 # la misma tabla compartida que usa `src/jokes/supabase_store.py`, en
-# `silver`.
+# `silver`. `teoria_documentos` (task 61) es la fuente de trabajo de la
+# ingesta desde P25 — la fila Silver que sustituye al `manifest.json`.
 _SCHEMA_TABLAS: dict[str, tuple[str, str]] = {
     "teoria_chunks": ("gold", "teoria_chunks"),
     "fuentes": ("silver", "fuentes"),
+    "teoria_documentos": ("silver", "teoria_documentos"),
 }
 
 
@@ -221,3 +240,39 @@ class TeoriaStore:
             payload["licencia"] = licencia
         creado = _tabla(self.client, "fuentes").insert(payload).execute()
         return creado.data[0]["id"]
+
+    # -- teoria_documentos (Silver, origen de trabajo desde task 61) -------
+
+    def listar_documentos_pendientes(self) -> list[dict]:
+        """Filas de `silver.teoria_documentos` que aún no tienen ningún chunk
+        en `gold.teoria_chunks` — la selección por defecto de "qué ingestar"
+        (`src/theory/SPEC.md` §Task 61: "resumible y se autocura tras un
+        fallo parcial", en vez de "la última versión").
+
+        PostgREST/`supabase-py` no ofrece un `NOT IN (subquery)` cross-schema
+        en una sola llamada, así que esto hace lo más simple y correcto para
+        el volumen de este proyecto (batch, no miles de filas): (a) trae
+        todas las filas de `silver.teoria_documentos`, (b) trae el conjunto
+        de `doc_id` ya presentes en `gold.teoria_chunks` (columna que, tras
+        esta task, es siempre `str(silver.teoria_documentos.id)`), (c)
+        filtra en Python las de (a) cuyo `str(id)` no está en (b). Es el
+        mismo criterio de "reingestar no duplica" que ya aplica
+        `TeoriaStore.guardar_chunk` vía el `unique(doc_id, version_corpus,
+        chunk_index)`, aplicado aquí ANTES de gastar una llamada de
+        embeddings — que es la motivación explícita de la spec.
+        """
+        documentos = _tabla(self.client, "teoria_documentos").select("*").execute().data or []
+        chunks_existentes = (
+            _tabla(self.client, "teoria_chunks").select("doc_id").execute().data or []
+        )
+        doc_ids_con_chunks = {str(fila["doc_id"]) for fila in chunks_existentes}
+        return [doc for doc in documentos if str(doc["id"]) not in doc_ids_con_chunks]
+
+    def descargar_documento(self, bucket: str, object_path: str) -> bytes:
+        """Descarga el contenido de un objeto de Storage (el `.md` de una
+        fila Silver). Capa fina sobre `supabase-py`
+        (`client.storage.from_(bucket).download(object_path)`), mismo patrón
+        ya testeado sin red que `DocumentStore` usa para `upload`
+        (`tests/unit/utils/test_document_store.py`, task 58).
+        """
+        return self.client.storage.from_(bucket).download(object_path)
