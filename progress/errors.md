@@ -17,6 +17,54 @@
 
 ---
 
+## Hallazgo — CI: deploy_telegram_webhook.yml nunca pasó (6/6 runs en rojo)
+
+**Fecha:** 2026-07-29
+**Contexto:** tarea correctiva ad-hoc (sin id en `feature_list.json`), descubierta
+al intentar arrancar la task 56 (cutover de producción), cuyo primer paso
+requiere que el deploy automático de Flujo B funcione. `gh run list
+--workflow=deploy_telegram_webhook.yml` mostraba 6/6 ejecuciones fallidas desde
+que se creó el workflow (task 40) — el job `test` (gate de `pytest tests/unit/`
+antes de deployar) nunca pasó, así que `deploy` nunca llegó a correr. El VPS de
+producción llevaba ~15 tareas mergeadas de retraso.
+
+**Causa raíz (dos problemas de entorno del runner, ninguno de lógica):**
+1. `poppler` no instalado en `ubuntu-latest`. `pdf2image` (usado por
+   `src/theory/parsers/pdf_parser.py`) lo necesita para
+   `pdf2image.pdfinfo_from_path` → sin él, `PDFInfoNotInstalledError`. Rompía
+   2 tests de `test_pdf_parser.py` directamente y 5 más de `test_pipeline.py`
+   en cascada (mismo fixture PDF real).
+2. `tests/unit/theory/test_whisperx_parser.py` leía un extracto real de
+   `data/raw/transcriptions/Tomas/TOMASFUENTES_3_ELTEMA_transcripcion.txt` —
+   material sagrado que nunca se comitea (regla dura de `CLAUDE.md`). En un
+   checkout limpio de CI ese fichero no existe → `FileNotFoundError` en 2 tests.
+   La intención del test (extracto real multi-speaker para probar "speaker
+   dominante") es correcta; solo le faltaba un skip explícito para cuando el
+   fichero fuente no está disponible.
+
+**Fix:**
+1. `.github/workflows/deploy_telegram_webhook.yml`: nuevo step "Instalar
+   poppler (dependencia de sistema de pdf2image)" (`apt-get install -y
+   poppler-utils`) antes de "Instalar dependencias", en el job `test`.
+2. `tests/unit/theory/test_whisperx_parser.py`: la fixture `multi_speaker_txt`
+   hace `pytest.skip(...)` con motivo explícito si `MULTI_SPEAKER_SOURCE.exists()`
+   es `False`, en vez de fallar con `FileNotFoundError`.
+
+**Verificación:** local (poppler ya instalado en el runner de la sub-sesión;
+`data/raw/` no presente en el worktree, así que el skip se disparó de verdad,
+no solo por inspección): `tests/unit/theory/test_pdf_parser.py` y
+`test_pipeline.py` 26/26 en verde; `test_whisperx_parser.py` 2 tests afectados
+en skip limpio (no error); suite completa `tests/unit/`: 625 passed, 2 skipped,
+0 failed, 0 errors (antes en CI: 7 failed, 2 errors). Solo 2 ficheros tocados,
+diff de 3+6 líneas — sin scope creep, sin tocar `test_pdf_parser.py`,
+`test_pipeline.py`, otros workflows ni `feature_list.json`.
+
+**Pendiente de confirmar en real:** esta es la primera vez que el job `test`
+de este workflow puede pasar en un runner real de GitHub Actions — el run de
+`main` tras el merge es la prueba definitiva, no la verificación local.
+
+---
+
 ## Task 14 — taxonomias.py (mapeo con loop acotado P16)
 
 **Fecha:** 2026-07-23
