@@ -34,6 +34,16 @@ es una clase fina que llama a esas funciones puras y luego ejecuta la
 llamada real contra `supabase-py` — se testea de verdad (sin mocks frágiles
 de la librería) en `tests/integration/test_supabase_store_live.py`, con
 `skip` explícito si `schema.sql` aún no se ha aplicado en Supabase.
+
+Acceso por schema (task 54, `SPEC.md` §"Acceso por schema con supabase-py"):
+todos los métodos resuelven la tabla vía `_tabla(self.client, nombre_logico)`
+en vez de `self.client.table(...)` directo. `_tabla` mira el modo activo
+(env `SUPABASE_SCHEMA_MODE`, default `SCHEMA_MODE_DEFAULT = "public"`) — en
+`"public"` es exactamente `client.table(nombre_logico)`, sin `.schema(...)`
+de por medio (cero cambio de comportamiento observable); en cualquier otro
+valor antepone `.schema(...)` resuelto vía `_SCHEMA_TABLAS`, el mapeo
+schema/tabla que fija `SPEC.md`. El flip del default a producción es tarea
+de las tasks 55/56, no de este módulo.
 """
 from __future__ import annotations
 
@@ -57,6 +67,63 @@ TIPOS_FUENTE_CHISTE = ("propio", "propio_historico")
 ESTADOS_CHISTE = ("idea_suelta", "con_estructura", "rematado")
 TIPOS_CANDIDATO_TAXONOMIA = ("tema", "tecnica")
 ESTADOS_CANDIDATO_TAXONOMIA = ("pendiente", "aceptado", "rechazado")
+
+# ---------------------------------------------------------------------------
+# Acceso por schema (task 54, `src/jokes/SPEC.md` §"Acceso por schema con
+# supabase-py") — contrato schema/tabla por nombre lógico de tabla, resuelto
+# en `_tabla()` en vez de en cada call site (`self.client.table(...)`).
+#
+# Modo activo vía env `SUPABASE_SCHEMA_MODE` (constante `SCHEMA_MODE_DEFAULT`
+# si la variable no está fijada). Dos valores válidos:
+#   - "public" (default): pre-cutover, tablas hoy en Supabase real. Resuelve
+#     a EXACTAMENTE `client.table(nombre_logico)` — mismo call site que antes
+#     de este refactor, cero `.schema(...)` de por medio. Es la única forma
+#     de garantizar "sin cambio de comportamiento observable" (criterio de
+#     la task 54): un doble de test que no implemente `.schema()` sigue
+#     funcionando sin tocarlo.
+#   - "p25": post-cutover (tasks 55/56 lo activan tras aplicar
+#     `migration_p25_schemas.sql` contra Supabase real y exponer los schemas
+#     en PostgREST). Resuelve a `client.schema(schema).table(tabla)` según
+#     `_SCHEMA_TABLAS`, el mapeo fijado por `SPEC.md` §"Acceso por schema".
+# ---------------------------------------------------------------------------
+
+SCHEMA_MODE_DEFAULT = "public"
+
+# nombre_logico -> (schema, tabla) una vez aplicado el cutover P25. Los
+# nombres lógicos son los mismos que hoy se pasan a `.table(...)` en modo
+# "public" (p.ej. "chistes_telegram_bronze"); el valor de la derecha es lo
+# que exige `SPEC.md` post-cutover (p.ej. `bronze.chistes_telegram`, sin el
+# sufijo "_bronze" porque la capa ya la dice el schema).
+_SCHEMA_TABLAS: dict[str, tuple[str, str]] = {
+    "chistes": ("silver", "chistes"),
+    "chistes_revisiones": ("silver", "chistes_revisiones"),
+    "temas": ("silver", "temas"),
+    "tecnicas": ("silver", "tecnicas"),
+    "fuentes": ("silver", "fuentes"),
+    "candidatos_taxonomia": ("silver", "candidatos_taxonomia"),
+    "chistes_telegram_bronze": ("bronze", "chistes_telegram"),
+}
+
+
+def _schema_mode() -> str:
+    """Modo de schema activo — lee `SUPABASE_SCHEMA_MODE` del entorno en cada
+    llamada (no en import) para que un test pueda cambiarlo con
+    `monkeypatch.setenv` sin recargar el módulo."""
+    return os.environ.get("SUPABASE_SCHEMA_MODE", SCHEMA_MODE_DEFAULT)
+
+
+def _tabla(client: Any, nombre_logico: str) -> Any:
+    """Punto único de resolución tabla -> builder PostgREST (§Storage).
+
+    En modo `"public"` (default) es `client.table(nombre_logico)` sin más —
+    idéntico al call site que existía antes de la task 54. En cualquier otro
+    modo antepone `.schema(...)` resuelto vía `_SCHEMA_TABLAS`.
+    """
+    if _schema_mode() == "public":
+        return client.table(nombre_logico)
+    schema, tabla = _SCHEMA_TABLAS[nombre_logico]
+    return client.schema(schema).table(tabla)
+
 
 # Columnas mutables de `chistes` vía `actualizar_chiste` (excluye `id` y
 # `created_at`, que no se tocan tras la inserción).
@@ -375,12 +442,12 @@ class SupabaseStore:
 
     def crear_chiste(self, **kwargs) -> dict:
         payload = _build_chiste_payload(**kwargs)
-        resultado = self.client.table("chistes").insert(payload).execute()
+        resultado = _tabla(self.client, "chistes").insert(payload).execute()
         return resultado.data[0]
 
     def obtener_chiste(self, chiste_id: str) -> Optional[dict]:
         resultado = (
-            self.client.table("chistes").select("*").eq("id", chiste_id).execute()
+            _tabla(self.client, "chistes").select("*").eq("id", chiste_id).execute()
         )
         filas = resultado.data
         return filas[0] if filas else None
@@ -388,7 +455,7 @@ class SupabaseStore:
     def actualizar_chiste(self, chiste_id: str, **campos) -> dict:
         payload = _build_chiste_update_payload(campos)
         resultado = (
-            self.client.table("chistes").update(payload).eq("id", chiste_id).execute()
+            _tabla(self.client, "chistes").update(payload).eq("id", chiste_id).execute()
         )
         return resultado.data[0]
 
@@ -416,7 +483,7 @@ class SupabaseStore:
         posible representación de texto serializado de pgvector.
         """
         valores = _normalizar_tipo_fuente_candidatos(tipo_fuente)
-        query = self.client.table("chistes").select("id, hash_normalizado, embedding")
+        query = _tabla(self.client, "chistes").select("id, hash_normalizado, embedding")
         query = (
             query.eq("tipo_fuente", valores[0])
             if len(valores) == 1
@@ -436,12 +503,12 @@ class SupabaseStore:
 
     def crear_revision(self, **kwargs) -> dict:
         payload = _build_revision_payload(**kwargs)
-        resultado = self.client.table("chistes_revisiones").insert(payload).execute()
+        resultado = _tabla(self.client, "chistes_revisiones").insert(payload).execute()
         return resultado.data[0]
 
     def listar_revisiones(self, chiste_id: str) -> list[dict]:
         resultado = (
-            self.client.table("chistes_revisiones")
+            _tabla(self.client, "chistes_revisiones")
             .select("*")
             .eq("chiste_id", chiste_id)
             .order("version")
@@ -452,21 +519,21 @@ class SupabaseStore:
     # -- taxonomías editables (temas, tecnicas, fuentes) -----------------
 
     def listar_temas(self) -> list[dict]:
-        return self.client.table("temas").select("*").execute().data
+        return _tabla(self.client, "temas").select("*").execute().data
 
     def crear_tema(self, nombre: str) -> dict:
-        resultado = self.client.table("temas").insert({"nombre": nombre}).execute()
+        resultado = _tabla(self.client, "temas").insert({"nombre": nombre}).execute()
         return resultado.data[0]
 
     def listar_tecnicas(self) -> list[dict]:
-        return self.client.table("tecnicas").select("*").execute().data
+        return _tabla(self.client, "tecnicas").select("*").execute().data
 
     def crear_tecnica(self, nombre: str) -> dict:
-        resultado = self.client.table("tecnicas").insert({"nombre": nombre}).execute()
+        resultado = _tabla(self.client, "tecnicas").insert({"nombre": nombre}).execute()
         return resultado.data[0]
 
     def listar_fuentes(self) -> list[dict]:
-        return self.client.table("fuentes").select("*").execute().data
+        return _tabla(self.client, "fuentes").select("*").execute().data
 
     def crear_fuente(
         self, nombre: str, tipo_fuente: Optional[str] = None, licencia: Optional[str] = None
@@ -476,20 +543,20 @@ class SupabaseStore:
             payload["tipo_fuente"] = tipo_fuente
         if licencia is not None:
             payload["licencia"] = licencia
-        resultado = self.client.table("fuentes").insert(payload).execute()
+        resultado = _tabla(self.client, "fuentes").insert(payload).execute()
         return resultado.data[0]
 
     # -- candidatos_taxonomia (cola de revisión humana, §Taxonomías) -----
 
     def crear_candidato_taxonomia(self, **kwargs) -> dict:
         payload = _build_candidato_payload(**kwargs)
-        resultado = self.client.table("candidatos_taxonomia").insert(payload).execute()
+        resultado = _tabla(self.client, "candidatos_taxonomia").insert(payload).execute()
         return resultado.data[0]
 
     def listar_candidatos_taxonomia(self, estado: str = "pendiente") -> list[dict]:
         _validar_estado_candidato(estado)
         resultado = (
-            self.client.table("candidatos_taxonomia")
+            _tabla(self.client, "candidatos_taxonomia")
             .select("*")
             .eq("estado", estado)
             .execute()
@@ -499,7 +566,7 @@ class SupabaseStore:
     def actualizar_candidato_taxonomia(self, candidato_id: int, estado: str) -> dict:
         payload = _build_candidato_update_payload(estado)
         resultado = (
-            self.client.table("candidatos_taxonomia")
+            _tabla(self.client, "candidatos_taxonomia")
             .update(payload)
             .eq("id", candidato_id)
             .execute()
@@ -519,7 +586,7 @@ class SupabaseStore:
         """
         payload = _build_mensaje_telegram_bronze_payload(**kwargs)
         resultado = (
-            self.client.table("chistes_telegram_bronze")
+            _tabla(self.client, "chistes_telegram_bronze")
             .upsert(payload, on_conflict="telegram_update_id", ignore_duplicates=True)
             .execute()
         )
@@ -544,7 +611,7 @@ class SupabaseStore:
         """
         payload = _build_telegram_bronze_procesado_payload()
         resultado = (
-            self.client.table("chistes_telegram_bronze")
+            _tabla(self.client, "chistes_telegram_bronze")
             .update(payload)
             .eq("id", fila_id)
             .execute()
@@ -572,7 +639,7 @@ class SupabaseStore:
         propio filtro.
         """
         resultado = (
-            self.client.table("chistes_telegram_bronze")
+            _tabla(self.client, "chistes_telegram_bronze")
             .select("id, texto_raw")
             .is_("procesado_at", "null")
             .execute()
