@@ -39,6 +39,12 @@ def multi_speaker_txt(tmp_path):
     contiene dos cambios reales de speaker (SPEAKER_00 -> SPEAKER_01 -> SPEAKER_00
     -> SPEAKER_01 -> SPEAKER_00), con SPEAKER_00 claramente dominante en texto.
     """
+    if not MULTI_SPEAKER_SOURCE.exists():
+        pytest.skip(
+            f"Fixture real fuera de tests/fixtures/ no disponible en este checkout: {MULTI_SPEAKER_SOURCE} "
+            "(material sagrado en data/raw/, nunca se comitea a git — solo existe en checkouts locales "
+            "con el corpus completo, no en CI). Ver progress/limitaciones_entorno.md."
+        )
     lineas = MULTI_SPEAKER_SOURCE.read_text(encoding="utf-8").splitlines()
     extracto = "\n".join(lineas[54:90])  # líneas 55-90 (1-indexado)
     destino = tmp_path / "multi_speaker_extracto.txt"

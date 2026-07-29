@@ -68,6 +68,9 @@ jobs:
           cache: "pip"
           cache-dependency-path: requirements.txt
 
+      - name: Instalar poppler (dependencia de sistema de pdf2image)
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils
+
       - name: Instalar dependencias
         run: pip install -r requirements.txt
 
