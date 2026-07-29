@@ -1,15 +1,35 @@
-"""validate_corpus — gate de validación de `/data/processed/v{N}/` (Flujo A).
+"""validate_corpus — gate de validación de CONTENIDO de Flujo A (Teoría).
 
-Contrato (`ROADMAP_DATA_PIPELINE.md` §"Checks de Validación del Corpus
-Final", `CHECKPOINTS.md`, `src/theory/SPEC.md` §Storage/§Metadatos): último
-paso antes de dar por bueno un commit/PR que toque la salida de Flujo A.
-Valida el `.txt` + `manifest.json` + `stats.json` que genera
-`generar_version` (`src/theory/normalizers/format_normalizer.py`, task 11) —
-NO reprocesa nada, NO llama a ningún LLM, NO toca Flujos B/C (Supabase,
-Telegram): esos flujos no tienen credenciales configuradas todavía (ver
-`progress/errors.md`) y su validación queda fuera de alcance de esta tarea.
+Contrato (`src/theory/SPEC.md` §"`validate_corpus.py` sin `manifest.json`
+(task 62)", `CHECKPOINTS.md`): último paso antes de dar por bueno un
+commit/PR que toque la salida de Flujo A. Hasta la task 62 validaba
+`v{N}/documents/*.txt` + `manifest.json` en disco; desde P25 la fuente de
+verdad es `silver.teoria_documentos` (Supabase) + el objeto correspondiente
+en el bucket privado `silver-teoria` — este script deja de leer `v{N}/` como
+fuente POR DEFECTO. `generar_version`/`v{N}` no se retiran con esta task
+(scope exclusivo de la task 63): este script simplemente deja de consumirlos
+como gate por defecto.
 
-## Los 8 checks (contrato literal de `ROADMAP_DATA_PIPELINE.md`)
+## Dos modos
+
+1. **Supabase (por defecto, sin argumento)**: construye un `TeoriaStore` real
+   (credenciales de `.env` — si faltan, `TeoriaStoreError` con mensaje claro,
+   nunca un traceback críptico), lista las filas VIGENTES de
+   `silver.teoria_documentos` (`TeoriaStore.listar_documentos_vigentes()`:
+   una por clave de linaje `origen_hash_md5`, la de `created_at` más
+   reciente por grupo — los renderizados antiguos se conservan por diseño y
+   NO se validan, ver SPEC), descarga el objeto de cada una desde
+   `silver-teoria` y corre los 7 checks de contenido + `check_fila_objeto_coherente`.
+2. **Ruta local (`python scripts/validate_corpus.py <ruta>`)**: para testear
+   los 7 checks con fixtures reales sin red. `<ruta>` apunta a un directorio
+   que contiene ficheros `.md` DIRECTAMENTE (glob `*.md` — ya NO
+   `v{N}/documents/*.txt` + `manifest.json`, ese formato se retira con esta
+   task). Corre SOLO los 7 checks: no hay fila Supabase con la que comparar,
+   así que `check_fila_objeto_coherente` NO APLICA — se reporta
+   explícitamente como tal en el resumen impreso (nunca en silencio, nunca
+   como fallo) y el total pasa a ser sobre 7, no sobre 8.
+
+## Los 8 checks (7 conservados + `check_fila_objeto_coherente`)
 
 1. ningún fichero tiene timestamps `[XX.XXs]`
 2. ningún fichero tiene `SPEAKER_XX:`
@@ -22,8 +42,17 @@ Telegram): esos flujos no tienen credenciales configuradas todavía (ver
 7. todos los idiomas detectados (`idioma_original`/`idioma_fragmento` de cada
    fragmento) están en la lista permitida (`es`, `en` — corpus bilingüe
    explícito de teoría, ver `src/theory/SPEC.md` §Idioma)
-8. `manifest.json` referencia exactamente los mismos ficheros que existen en
-   `documents/`
+8. `check_fila_objeto_coherente` (sustituye a `check_manifest_sincronizado`,
+   retirado junto con `manifest.json`): por cada fila vigente, (a) el objeto
+   se descarga sin error desde `silver-teoria` bajo su `object_path` — si
+   `TeoriaStore.descargar_documento` lanza, es el fallo de este check (objeto
+   ausente/404, el huérfano "fila sin objeto correcto" que `document_store`
+   decide tolerar al escribir el objeto antes que la fila); (b)
+   `md5(bytes descargados) == fila["hash_md5"]`. Más fuerte que el check 8
+   original (que solo comparaba nombres, nunca contenido). NO comprueba la
+   completitud Bronze<->Silver — eso es la task 68 (topología cross-capa),
+   fuera de alcance de este script (§SPEC "task 62 valida contenido, task 68
+   valida topología").
 
 ## Por qué un parser YAML propio (no `pyyaml`)
 
@@ -38,32 +67,48 @@ el que ambos ficheros documentan el formato exacto en sus docstrings).
 
 ## Diseño: funciones puras por check
 
-Cada check es una función pura `check_xxx(documentos: list[DocumentoLeido], ...)
--> ResultadoCheck` que NO hace I/O — recibe los documentos ya leídos y
-parseados por `leer_documento`/`cargar_documentos`. Esto permite testear cada
-check por separado con datos ya en memoria, y a la vez componerlos todos en
-`validar_version` (que sí hace I/O: lee `manifest.json` + `documents/*.txt`
-de un `v{N}/` real). Determinista, sin LLM, sin red.
+Cada uno de los 7 checks de contenido es una función pura
+`check_xxx(documentos: list[DocumentoLeido]) -> ResultadoCheck` que NO hace
+I/O — recibe los documentos ya leídos y parseados, sin que le importe si
+vinieron de disco (`cargar_documentos`, modo ruta local) o de Storage
+(`_leer_filas_vigentes`, modo Supabase): mismo algoritmo de parseo en los dos
+casos (`_parsear_documento`), agnóstico del origen. `check_fila_objeto_coherente`
+es la excepción deliberada: necesita, además del `DocumentoLeido`, la fila
+Supabase y los bytes crudos descargados (para el hash), así que opera sobre
+`list[FilaSilverLeida]`, no sobre `list[DocumentoLeido]` — es justo el check
+que no tiene equivalente en modo ruta local. Determinista, sin LLM.
 
 ## CLI
 
-    python scripts/validate_corpus.py [ruta_a_v{N}]
+    python scripts/validate_corpus.py [ruta_local]
 
-Sin argumento: valida la última versión FINALIZADA (con `manifest.json`) de
-`data/processed/`. Con argumento: valida esa ruta explícita (debe apuntar
-directamente al directorio `v{N}/`, útil para testear contra un `tmp_path`
-en vez del repo real). Exit code 0 si todos los checks pasan, 1 si alguno
-falla o si no hay ninguna versión que validar (nunca una excepción críptica
-para ese caso: es un resultado esperado, no un bug).
+Sin argumento: modo Supabase (filas vigentes de `silver.teoria_documentos`).
+Con argumento: modo ruta local, valida los `.md` de esa ruta directamente
+(sin red, sin `TeoriaStore`, útil para testear contra un `tmp_path` con
+fixtures). Exit code 0 si todos los checks aplicables pasan, 1 si alguno
+falla o si el modo Supabase no puede ni siquiera arrancar (credenciales
+ausentes) — nunca una excepción críptica para esos casos.
 """
+from __future__ import annotations
+
 import argparse
 import hashlib
-import json
 import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+# Bootstrap de sys.path: permite invocar `python scripts/validate_corpus.py`
+# sin depender de PYTHONPATH ni de que el invocador esté en la raíz del repo
+# (mismo patrón que `scripts/run_pipeline.py`/`scripts/reprocesar_bronze_pendiente.py`
+# — necesario desde esta task porque, a diferencia de antes de la task 62,
+# el script ahora importa `src.theory.teoria_store` para el modo Supabase).
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from src.theory.teoria_store import TeoriaStore, TeoriaStoreError  # noqa: E402
 
 MIN_PALABRAS = 100
 MAX_PALABRAS = 50_000
@@ -73,10 +118,8 @@ CAMPOS_DOCUMENTO_REQUERIDOS = ("fuente", "autor", "tipo_fuente", "licencia")
 CAMPOS_FRAGMENTO_REQUERIDOS = ("subtipo", "idioma_original", "idioma_fragmento")
 """Junto con los 4 de documento, suman los 7 campos de `CHECKPOINTS.md`."""
 
-NOMBRE_MANIFEST = "manifest.json"
-DIRECTORIO_DOCUMENTOS = "documents"
+BUCKET_SILVER_TEORIA = "silver-teoria"
 
-_PATRON_VERSION = re.compile(r"^v(\d+)$")
 _PATRON_TIMESTAMP = re.compile(r"\[\d+(?:\.\d+)?s\]")
 _PATRON_SPEAKER = re.compile(r"SPEAKER_\d+:")
 
@@ -86,11 +129,12 @@ _PATRON_SPEAKER = re.compile(r"SPEAKER_\d+:")
 
 @dataclass
 class DocumentoLeido:
-    """Un documento `.txt` de `v{N}/documents/` ya leído y parseado.
+    """Un documento (`.md` de Silver, o `.md`/`.txt` de un fixture local) ya
+    leído y parseado.
 
-    `path_relativo`: ruta relativa a `v{N}/` (p.ej. `"documents/foo.txt"`,
-    tal como aparece en `manifest.json`), NO un `Path` absoluto — es lo que
-    se compara contra `manifest.json` en el check 8.
+    `path_relativo`: identifica el documento en los mensajes de error de los
+    7 checks. En modo Supabase es el `object_path` de la fila; en modo ruta
+    local, el nombre del fichero.
     """
 
     path_relativo: str
@@ -163,9 +207,14 @@ def _parsear_frontmatter(cabecera: str) -> tuple[dict, list]:
     return metadatos, fragmentos
 
 
-def leer_documento(ruta: Path, path_relativo: str) -> DocumentoLeido:
-    """Lee y parsea UN `.txt` de `documents/`. Sin validar nada — solo extrae."""
-    contenido = ruta.read_text(encoding="utf-8")
+def _parsear_documento(contenido: str, path_relativo: str) -> DocumentoLeido:
+    """Algoritmo de parseo puro (cabecera YAML `---\\n...\\n---\\n` + cuerpo),
+    SIN cambios respecto a antes de la task 62 — solo se extrajo de
+    `leer_documento` para poder aplicarlo también a texto ya en memoria
+    (bytes descargados de Storage y decodificados), no solo a un `Path` en
+    disco. Agnóstico del origen del texto (mismo formato que emite
+    `render_document` de `format_normalizer.py`, tanto para el `.txt` de
+    `v{N}/` legacy como para el `.md` que sube la task 60 a Silver)."""
     partes = contenido.split("---\n", 2)
 
     if len(partes) < 3 or partes[0] != "":
@@ -197,29 +246,25 @@ def leer_documento(ruta: Path, path_relativo: str) -> DocumentoLeido:
     )
 
 
-def cargar_documentos(directorio_version: Path) -> list[DocumentoLeido]:
-    """Lee todos los `.txt` de `directorio_version/documents/`, ordenados por
-    nombre (determinismo del orden de reporte)."""
-    directorio_documentos = directorio_version / DIRECTORIO_DOCUMENTOS
-    if not directorio_documentos.is_dir():
+def leer_documento(ruta: Path, path_relativo: str) -> DocumentoLeido:
+    """Lee y parsea UN `.md`/`.txt` de disco (modo ruta local). Envoltorio de
+    I/O sobre `_parsear_documento` — el algoritmo de parseo en sí no cambia."""
+    contenido = ruta.read_text(encoding="utf-8")
+    return _parsear_documento(contenido, path_relativo)
+
+
+def cargar_documentos(directorio: Path) -> list[DocumentoLeido]:
+    """Modo ruta local: lee todos los `.md` de `directorio` DIRECTAMENTE
+    (glob `*.md`, ordenados por nombre para determinismo del reporte).
+
+    Ya NO `directorio/documents/*.txt` + `manifest.json` — ese formato se
+    retira con la task 62 (`src/theory/SPEC.md`); `directorio` apunta ahora
+    al directorio que contiene los `.md` sin más, típicamente un `tmp_path`
+    de test con fixtures."""
+    if not directorio.is_dir():
         return []
-    rutas = sorted(directorio_documentos.glob("*.txt"))
-    return [
-        leer_documento(ruta, f"{DIRECTORIO_DOCUMENTOS}/{ruta.name}") for ruta in rutas
-    ]
-
-
-def cargar_manifest(directorio_version: Path) -> dict:
-    """Lee `manifest.json` de la versión. Lanza `FileNotFoundError` (con
-    mensaje claro) si no existe — lo captura `main`, nunca una excepción
-    críptica llega al usuario final del CLI."""
-    ruta_manifest = directorio_version / NOMBRE_MANIFEST
-    if not ruta_manifest.exists():
-        raise FileNotFoundError(
-            f"{ruta_manifest} no existe: {directorio_version} no es una versión "
-            f"válida de Flujo A (falta el índice inmutable del corpus)"
-        )
-    return json.loads(ruta_manifest.read_text(encoding="utf-8"))
+    rutas = sorted(directorio.glob("*.md"))
+    return [leer_documento(ruta, ruta.name) for ruta in rutas]
 
 
 # --- Resultado de un check ---------------------------------------------------
@@ -235,7 +280,7 @@ class ResultadoCheck:
     detalles: list = field(default_factory=list)
 
 
-# --- Los 8 checks (funciones puras, testeables por separado) ----------------
+# --- Los 7 checks de contenido (funciones puras, testeables por separado) ---
 
 
 def check_sin_timestamps(documentos: list[DocumentoLeido]) -> ResultadoCheck:
@@ -340,28 +385,6 @@ def check_idiomas_permitidos(documentos: list[DocumentoLeido]) -> ResultadoCheck
     return ResultadoCheck("idiomas_permitidos", not detalles, detalles)
 
 
-def check_manifest_sincronizado(
-    documentos: list[DocumentoLeido], manifest: dict
-) -> ResultadoCheck:
-    """Check 8: `manifest.json["documents"][*]["path"]` == exactamente los
-    ficheros que existen en `documents/` (ni de más ni de menos)."""
-    rutas_manifest = {entrada["path"] for entrada in manifest.get("documents", [])}
-    rutas_reales = {doc.path_relativo for doc in documentos}
-
-    detalles = []
-    solo_en_manifest = sorted(rutas_manifest - rutas_reales)
-    solo_en_disco = sorted(rutas_reales - rutas_manifest)
-    if solo_en_manifest:
-        detalles.append(
-            f"manifest.json referencia fichero(s) inexistente(s): {solo_en_manifest}"
-        )
-    if solo_en_disco:
-        detalles.append(
-            f"documents/ tiene fichero(s) no referenciado(s) en manifest.json: {solo_en_disco}"
-        )
-    return ResultadoCheck("manifest_sincronizado", not detalles, detalles)
-
-
 CHECKS = (
     check_sin_timestamps,
     check_sin_speaker_tags,
@@ -371,47 +394,97 @@ CHECKS = (
     check_sin_duplicados,
     check_idiomas_permitidos,
 )
-"""Checks que solo necesitan `documentos` (check 8 necesita también `manifest`
-y se ejecuta aparte en `validar_version`)."""
+"""Los 7 checks de contenido, comunes a los dos modos — cada uno solo
+necesita `list[DocumentoLeido]`, nunca la fila Supabase (ver
+`check_fila_objeto_coherente` para el check 8, que sí la necesita)."""
 
 
-def validar_version(directorio_version: Path) -> list[ResultadoCheck]:
-    """Ejecuta los 8 checks contra `directorio_version` (un `v{N}/` real, con
-    `documents/*.txt` + `manifest.json`). Lanza `FileNotFoundError` si
-    `directorio_version` no tiene `manifest.json` — responsabilidad de quien
-    llama (p.ej. `main`) decidir cómo reportarlo sin traceback críptico."""
-    manifest = cargar_manifest(directorio_version)
-    documentos = cargar_documentos(directorio_version)
+# --- Check 8: fila Silver <-> objeto de Storage (modo Supabase, task 62) ----
+
+
+@dataclass
+class FilaSilverLeida:
+    """Una fila VIGENTE de `silver.teoria_documentos` con el resultado de
+    intentar descargar y parsear su objeto de `silver-teoria`.
+
+    `contenido_bytes`/`documento` son `None` si la descarga falló (objeto
+    ausente/404 — ver `check_fila_objeto_coherente`, punto (a)): esa fila
+    sigue apareciendo aquí para que el check 8 la reporte, pero no aporta un
+    `DocumentoLeido` a los 7 checks de contenido (no hay contenido que
+    validar sin objeto)."""
+
+    fila: dict
+    contenido_bytes: Optional[bytes] = None
+    documento: Optional[DocumentoLeido] = None
+    error_descarga: Optional[str] = None
+
+
+def _leer_filas_vigentes(store: TeoriaStore, filas_vigentes: list[dict]) -> list[FilaSilverLeida]:
+    """Descarga y parsea el objeto de cada fila vigente. Un fallo de
+    descarga de UNA fila no aborta la validación de las demás — se registra
+    en `FilaSilverLeida.error_descarga` y lo reporta `check_fila_objeto_coherente`."""
+    resultado = []
+    for fila in filas_vigentes:
+        try:
+            contenido_bytes = store.descargar_documento(fila["bucket"], fila["object_path"])
+        except Exception as exc:  # noqa: BLE001 — cualquier fallo de storage es "objeto ausente" para el check 8
+            resultado.append(FilaSilverLeida(fila=fila, error_descarga=str(exc)))
+            continue
+        documento = _parsear_documento(contenido_bytes.decode("utf-8"), fila["object_path"])
+        resultado.append(
+            FilaSilverLeida(fila=fila, contenido_bytes=contenido_bytes, documento=documento)
+        )
+    return resultado
+
+
+def check_fila_objeto_coherente(filas_leidas: list[FilaSilverLeida]) -> ResultadoCheck:
+    """Check 8 (sustituye a `check_manifest_sincronizado`, retirado junto con
+    `manifest.json`): por cada fila vigente, (a) el objeto se descargó sin
+    error de `silver-teoria` (si no, objeto ausente/404 — el huérfano "fila
+    sin objeto correcto" que `document_store` decide tolerar al escribir el
+    objeto antes que la fila, §DocumentStore); (b)
+    `md5(bytes descargados) == fila["hash_md5"]`. Más fuerte que el check 8
+    original (que solo comparaba nombres, nunca contenido)."""
+    detalles = []
+    for fl in filas_leidas:
+        object_path = fl.fila.get("object_path", "<object_path desconocido>")
+        if fl.contenido_bytes is None:
+            detalles.append(
+                f"{object_path}: objeto no encontrado en {BUCKET_SILVER_TEORIA} "
+                f"({fl.error_descarga})"
+            )
+            continue
+        md5_real = hashlib.md5(fl.contenido_bytes).hexdigest()
+        md5_esperado = fl.fila.get("hash_md5")
+        if md5_real != md5_esperado:
+            detalles.append(
+                f"{object_path}: contenido descargado no coincide con la fila "
+                f"(fila.hash_md5={md5_esperado!r}, md5(objeto)={md5_real!r})"
+            )
+    return ResultadoCheck("fila_objeto_coherente", not detalles, detalles)
+
+
+# --- Orquestación de los dos modos -------------------------------------------
+
+
+def validar_supabase(store: TeoriaStore) -> list[ResultadoCheck]:
+    """Modo Supabase: filas vigentes de `silver.teoria_documentos` + objeto
+    de `silver-teoria` -> 7 checks de contenido + `check_fila_objeto_coherente`."""
+    filas_vigentes = store.listar_documentos_vigentes()
+    filas_leidas = _leer_filas_vigentes(store, filas_vigentes)
+    documentos = [fl.documento for fl in filas_leidas if fl.documento is not None]
 
     resultados = [check(documentos) for check in CHECKS]
-    resultados.append(check_manifest_sincronizado(documentos, manifest))
+    resultados.append(check_fila_objeto_coherente(filas_leidas))
     return resultados
 
 
-# --- Localización de la última versión (CLI) --------------------------------
-
-
-def _version_finalizada(directorio_version: Path) -> bool:
-    return (directorio_version / NOMBRE_MANIFEST).exists()
-
-
-def encontrar_ultima_version(directorio_base: Path) -> Optional[Path]:
-    """Devuelve el `Path` de la versión `v{N}/` finalizada (con
-    `manifest.json`) de mayor `N` dentro de `directorio_base`, o `None` si no
-    hay ninguna (ni `directorio_base` existe, ni ninguna `v{N}/` está
-    finalizada) — mismo criterio de "finalizada" que
-    `format_normalizer._version_finalizada` (ver su docstring)."""
-    if not directorio_base.is_dir():
-        return None
-
-    finalizadas = []
-    for entrada in directorio_base.iterdir():
-        if entrada.is_dir() and _PATRON_VERSION.match(entrada.name) and _version_finalizada(entrada):
-            finalizadas.append((int(_PATRON_VERSION.match(entrada.name).group(1)), entrada))
-
-    if not finalizadas:
-        return None
-    return max(finalizadas, key=lambda par: par[0])[1]
+def validar_ruta_local(directorio: Path) -> list[ResultadoCheck]:
+    """Modo ruta local: solo los 7 checks de contenido — no hay fila Supabase
+    con la que comparar, así que `check_fila_objeto_coherente` no aplica (ver
+    `main`, que lo comunica explícitamente en el resumen impreso)."""
+    documentos = cargar_documentos(directorio)
+    return [check(documentos) for check in CHECKS]
 
 
 # --- CLI ---------------------------------------------------------------------
@@ -425,13 +498,13 @@ def _imprimir_resultados(resultados: list[ResultadoCheck]) -> None:
             print(f"    - {detalle}")
 
 
-def main(argv: Optional[list] = None) -> int:
+def main(argv: Optional[list] = None, *, store: Optional[TeoriaStore] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="validate_corpus.py",
         description=(
-            "Valida la salida de Flujo A en /data/processed/v{N}/ contra los "
-            "8 checks de ROADMAP_DATA_PIPELINE.md. Gate previo a cada commit "
-            "que toque el corpus (CLAUDE.md raíz)."
+            "Valida el CONTENIDO de Flujo A: por defecto, las filas vigentes de "
+            "silver.teoria_documentos + su objeto en silver-teoria (Supabase). "
+            "Gate previo a cada commit que toque el corpus (CLAUDE.md raíz)."
         ),
     )
     parser.add_argument(
@@ -439,38 +512,41 @@ def main(argv: Optional[list] = None) -> int:
         nargs="?",
         default=None,
         help=(
-            "Ruta explícita a un directorio v{N}/ a validar (p.ej. para "
-            "testear contra un tmp_path). Por defecto: la última versión "
-            "finalizada de data/processed/."
+            "Ruta explícita a un directorio con ficheros .md a validar (modo "
+            "ruta local, sin red — p.ej. para testear contra un tmp_path con "
+            "fixtures). Por defecto: modo Supabase, filas vigentes de "
+            "silver.teoria_documentos."
         ),
     )
     args = parser.parse_args(argv)
 
     if args.ruta is not None:
-        directorio_version = Path(args.ruta)
-    else:
-        directorio_base = Path("data/processed")
-        directorio_version = encontrar_ultima_version(directorio_base)
-        if directorio_version is None:
-            print(
-                f"✗ No hay ninguna versión finalizada que validar en "
-                f"{directorio_base}/ (ninguna v{{N}}/manifest.json encontrada). "
-                f"Ejecuta el pipeline de Flujo A (scripts/run_pipeline.py) "
-                f"antes de validar."
-            )
+        directorio = Path(args.ruta)
+        resultados = validar_ruta_local(directorio)
+        _imprimir_resultados(resultados)
+        print(
+            "ℹ fila_objeto_coherente: no aplica en modo ruta local "
+            "(sin fila Supabase con la que comparar el objeto)"
+        )
+
+        todos_ok = all(r.ok for r in resultados)
+        n_ok = sum(1 for r in resultados if r.ok)
+        print(f"\n{n_ok}/{len(resultados)} checks OK (modo ruta local) — {directorio}")
+        return 0 if todos_ok else 1
+
+    if store is None:
+        try:
+            store = TeoriaStore()
+        except TeoriaStoreError as exc:
+            print(f"✗ {exc}")
             return 1
 
-    try:
-        resultados = validar_version(directorio_version)
-    except FileNotFoundError as exc:
-        print(f"✗ {exc}")
-        return 1
-
+    resultados = validar_supabase(store)
     _imprimir_resultados(resultados)
 
     todos_ok = all(r.ok for r in resultados)
     n_ok = sum(1 for r in resultados if r.ok)
-    print(f"\n{n_ok}/{len(resultados)} checks OK — {directorio_version}")
+    print(f"\n{n_ok}/{len(resultados)} checks OK (modo Supabase)")
     return 0 if todos_ok else 1
 
 

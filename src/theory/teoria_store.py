@@ -276,3 +276,35 @@ class TeoriaStore:
         (`tests/unit/utils/test_document_store.py`, task 58).
         """
         return self.client.storage.from_(bucket).download(object_path)
+
+    def listar_documentos_vigentes(self) -> list[dict]:
+        """Filas VIGENTES de `silver.teoria_documentos` — una por clave de
+        linaje (`origen_hash_md5`), la de `created_at` más reciente por grupo
+        (task 62, `src/theory/SPEC.md` §"`validate_corpus.py` sin
+        `manifest.json`"). Es la selección que consume `validate_corpus.py`:
+        los renderizados antiguos de un mismo original se conservan por
+        diseño (§Idempotencia y versionado) pero no se validan — solo el más
+        reciente por documento de origen.
+
+        Mismo criterio de volumen que `listar_documentos_pendientes`: trae
+        todas las filas y agrupa en Python (batch, no miles de filas), sin
+        `GROUP BY`/`DISTINCT ON` de PostgREST.
+
+        Comparación de "más reciente": `created_at` llega de `supabase-py`
+        como el string ISO 8601 que devuelve PostgREST tal cual (columna
+        `timestamptz`, sin reparsear — mismo criterio de "no reparsear lo que
+        ya viene bien formado" que `modified_time` en `document_store.py`).
+        Todas las filas las escribe el mismo `document_store.capturar` con
+        `default now()` de Postgres, así que comparten formato y precisión
+        (microsegundos + offset); la comparación lexicográfica de ese formato
+        ordena igual que la comparación temporal, sin necesidad de parsear a
+        `datetime`.
+        """
+        filas = _tabla(self.client, "teoria_documentos").select("*").execute().data or []
+        vigentes: dict[str, dict] = {}
+        for fila in filas:
+            clave = fila["origen_hash_md5"]
+            actual = vigentes.get(clave)
+            if actual is None or fila["created_at"] > actual["created_at"]:
+                vigentes[clave] = fila
+        return list(vigentes.values())
