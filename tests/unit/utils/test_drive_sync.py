@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from src.utils.drive_sync import EXTENSION_POR_MIME, DriveSync
+from src.utils.drive_sync import EXTENSION_POR_MIME, ArchivoSincronizado, DriveSync
 
 FIXTURE_DOCX = Path(__file__).parent.parent.parent / "fixtures" / "Freskito-Informático.docx"
 DOCX_BYTES = FIXTURE_DOCX.read_bytes()
@@ -434,3 +434,155 @@ def test_extension_por_mime_contains_expected_defaults():
     assert EXTENSION_POR_MIME[MIME_PDF] == ".pdf"
     assert EXTENSION_POR_MIME["application/epub+zip"] == ".epub"
     assert EXTENSION_POR_MIME[MIME_TXT] == ".txt"
+
+
+# --- sync_con_metadata (P25, task 57) ---
+# Contrato: src/utils/SPEC.md §"Ampliación: metadata por fichero (P25,
+# 2026-07-28 — task 57)". Estos tests son nuevos y no tocan ninguno de los
+# de arriba (contrato de regresión de las tasks 43/44).
+
+
+def test_sync_con_metadata_returns_archivo_sincronizado_with_six_fields(staging_dir, state_path):
+    archivo = _archivo("file1", "chiste1.docx", MIME_DOCX, "2026-07-20T10:00:00Z")
+    service = FakeDriveService([archivo], {"file1": DOCX_BYTES})
+    sync = DriveSync(
+        folder_id="folder123",
+        staging_dir=staging_dir,
+        state_path=state_path,
+        mimes_aceptados=MIMES_HISTORICO,
+        service=service,
+    )
+    resultado = sync.sync_con_metadata()
+
+    assert resultado == [
+        ArchivoSincronizado(
+            path=staging_dir / "chiste1.docx",
+            file_id="file1",
+            name="chiste1.docx",
+            modified_time="2026-07-20T10:00:00Z",
+            mime_type=MIME_DOCX,
+            mime_salida=MIME_DOCX,
+        )
+    ]
+
+
+def test_sync_con_metadata_name_differs_from_path_name_when_extension_added(staging_dir, state_path):
+    """Caso deliberado de la spec: `name` es el nombre lógico de Drive
+    (`Notas.txt`), distinto de `path.name` (nombre local con la extensión
+    añadida por el nombrado local, `Notas.txt.docx`)."""
+    archivo = _archivo("file1", "Notas.txt", MIME_GDOC, "2026-07-20T10:00:00Z")
+    service = FakeDriveService([archivo], {"file1": DOCX_BYTES})
+    sync = DriveSync(
+        folder_id="folder123",
+        staging_dir=staging_dir,
+        state_path=state_path,
+        mimes_aceptados={MIME_GDOC: MIME_DOCX},
+        service=service,
+    )
+    resultado = sync.sync_con_metadata()
+
+    assert len(resultado) == 1
+    archivo_sincronizado = resultado[0]
+    assert archivo_sincronizado.name == "Notas.txt"
+    assert archivo_sincronizado.path.name == "Notas.txt.docx"
+    assert archivo_sincronizado.name != archivo_sincronizado.path.name
+    assert archivo_sincronizado.mime_type == MIME_GDOC
+    assert archivo_sincronizado.mime_salida == MIME_DOCX
+
+
+def test_sync_con_metadata_mime_salida_for_direct_download(staging_dir, state_path):
+    """Descarga directa (mime_export=None): mime_salida == mime_type de origen."""
+    archivo = _archivo("file1", "chiste1.docx", MIME_DOCX, "2026-07-20T10:00:00Z")
+    service = FakeDriveService([archivo], {"file1": DOCX_BYTES})
+    sync = DriveSync(
+        folder_id="folder123",
+        staging_dir=staging_dir,
+        state_path=state_path,
+        mimes_aceptados=MIMES_HISTORICO,
+        service=service,
+    )
+    resultado = sync.sync_con_metadata()
+
+    assert resultado[0].mime_type == MIME_DOCX
+    assert resultado[0].mime_salida == MIME_DOCX
+
+
+def test_sync_con_metadata_mime_salida_for_export(staging_dir, state_path):
+    """Export (Google Doc -> DOCX): mime_type es el de origen (Google Doc),
+    mime_salida es el MIME real del contenido descargado (DOCX)."""
+    archivo = _archivo("file2", "Chiste Google Doc", MIME_GDOC, "2026-07-20T11:00:00Z")
+    service = FakeDriveService([archivo], {"file2": DOCX_BYTES})
+    sync = DriveSync(
+        folder_id="folder123",
+        staging_dir=staging_dir,
+        state_path=state_path,
+        mimes_aceptados=MIMES_HISTORICO,
+        service=service,
+    )
+    resultado = sync.sync_con_metadata()
+
+    assert resultado[0].mime_type == MIME_GDOC
+    assert resultado[0].mime_salida == MIME_DOCX
+
+
+def test_sync_returns_exactly_paths_of_sync_con_metadata(staging_dir, state_path):
+    """`sync()` sigue siendo `[a.path for a in sync_con_metadata()]` —
+    verificado comparando, sobre el MISMO `staging_dir`/`state_path` (para que
+    los paths resultantes sean comparables), el resultado de `sync_con_metadata()`
+    contra el de `sync()` invocado después de resetear el estado a cero."""
+    archivo1 = _archivo("file1", "a.docx", MIME_DOCX, "2026-07-20T10:00:00Z")
+    archivo2 = _archivo("file2", "Chiste Google Doc", MIME_GDOC, "2026-07-20T11:00:00Z")
+
+    service1 = FakeDriveService(
+        [archivo1, archivo2], {"file1": DOCX_BYTES, "file2": DOCX_BYTES}
+    )
+    sync1 = DriveSync(
+        folder_id="folder123",
+        staging_dir=staging_dir,
+        state_path=state_path,
+        mimes_aceptados=MIMES_HISTORICO,
+        service=service1,
+    )
+    resultado_metadata = sync1.sync_con_metadata()
+    assert {a.path.name for a in resultado_metadata} == {"a.docx", "Chiste Google Doc.docx"}
+
+    # resetea el estado de idempotencia a cero para comparar sync() en igualdad
+    # de condiciones (mismo staging_dir/state_path, ficheros "nuevos" otra vez)
+    state_path.unlink()
+
+    service2 = FakeDriveService(
+        [archivo1, archivo2], {"file1": DOCX_BYTES, "file2": DOCX_BYTES}
+    )
+    sync2 = DriveSync(
+        folder_id="folder123",
+        staging_dir=staging_dir,
+        state_path=state_path,
+        mimes_aceptados=MIMES_HISTORICO,
+        service=service2,
+    )
+    resultado_sync = sync2.sync()
+
+    assert resultado_sync == [a.path for a in resultado_metadata]
+
+
+def test_sync_con_metadata_shares_idempotency_state_with_sync(staging_dir, state_path):
+    """`sync()` y `sync_con_metadata()` comparten el mismo estado de
+    idempotencia: llamar a la segunda tras la primera (mismos ficheros, sin
+    cambios) no vuelve a stagear nada — igual que llamar a `sync()` dos veces."""
+    archivo = _archivo("file1", "chiste1.docx", MIME_DOCX, "2026-07-20T10:00:00Z")
+    service = FakeDriveService([archivo], {"file1": DOCX_BYTES})
+    sync = DriveSync(
+        folder_id="folder123",
+        staging_dir=staging_dir,
+        state_path=state_path,
+        mimes_aceptados=MIMES_HISTORICO,
+        service=service,
+    )
+    resultado1 = sync.sync()
+    assert resultado1 == [staging_dir / "chiste1.docx"]
+
+    resultado2 = sync.sync_con_metadata()
+    assert resultado2 == []
+
+    descargas = [c for c in service.files().calls if c[0] in ("get_media", "export")]
+    assert len(descargas) == 1

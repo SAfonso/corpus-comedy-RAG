@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -63,6 +64,23 @@ EXTENSION_POR_MIME: dict[str, str] = {
 }
 """MIME de SALIDA -> extensión del fichero local. Ampliable por consumidor vía
 `extension_por_mime` sin tocar este módulo."""
+
+
+@dataclass(frozen=True)
+class ArchivoSincronizado:
+    """Fichero sincronizado desde Drive, con su metadata de origen adjunta
+    (P25, task 57). `sync_con_metadata()` es quien la produce; `sync()` sigue
+    devolviendo solo `path` para no romper su contrato existente.
+
+    Contrato completo en `src/utils/SPEC.md` §"Ampliación: metadata por
+    fichero (P25, 2026-07-28 — task 57)"."""
+
+    path: Path          # destino local en staging_dir (lo que hoy devuelve sync())
+    file_id: str        # `id` de Drive -> Bronze.drive_file_id
+    name: str           # `name` de Drive (nombre lógico, SIN la extensión añadida por el nombrado local)
+    modified_time: str  # `modifiedTime` RFC 3339 tal cual lo da la API, sin reparsear
+    mime_type: str      # `mimeType` de ORIGEN en Drive
+    mime_salida: str    # MIME real del contenido en `path` (= mimes_aceptados[mime_type] or mime_type)
 
 
 class DriveSync:
@@ -199,12 +217,26 @@ class DriveSync:
         ficheros nuevos/modificados (idempotencia por metadata: `fileId` +
         `modifiedTime`) y devuelve sus paths locales. Los ficheros sin
         cambios desde el último `sync()` no se descargan ni se devuelven.
-        Nunca modifica los ficheros en Drive (solo lectura)."""
+        Nunca modifica los ficheros en Drive (solo lectura).
+
+        Envoltorio de compatibilidad sobre `sync_con_metadata()` (task 57):
+        misma firma y mismo comportamiento que antes de esa ampliación."""
+        return [a.path for a in self.sync_con_metadata()]
+
+    def sync_con_metadata(self) -> list[ArchivoSincronizado]:
+        """Igual que `sync()`, pero devuelve la metadata de Drive de cada
+        fichero sincronizado (`file_id`, `name`, `modified_time`, `mime_type`,
+        `mime_salida`) junto a su `path` local, en vez de solo el `path`
+        (P25, task 57 — ver `src/utils/SPEC.md`).
+
+        Comparte estado de idempotencia con `sync()`: llamar a las dos en la
+        misma corrida equivale a llamar a `sync()` dos veces (la segunda no
+        vuelve a stagear nada)."""
         service = self._get_service()
         estado = self._cargar_estado()
         self.staging_dir.mkdir(parents=True, exist_ok=True)
 
-        pendientes: list[Path] = []
+        pendientes: list[ArchivoSincronizado] = []
         for archivo in self._listar_archivos(service):
             file_id = archivo["id"]
             modified_time = archivo["modifiedTime"]
@@ -219,7 +251,19 @@ class DriveSync:
             destino = self.staging_dir / self._nombre_local(archivo)
             destino.write_bytes(contenido)
 
-            pendientes.append(destino)
+            mime_export = self.mimes_aceptados.get(archivo["mimeType"])
+            mime_salida = mime_export or archivo["mimeType"]
+
+            pendientes.append(
+                ArchivoSincronizado(
+                    path=destino,
+                    file_id=file_id,
+                    name=archivo["name"],
+                    modified_time=modified_time,
+                    mime_type=archivo["mimeType"],
+                    mime_salida=mime_salida,
+                )
+            )
             estado[file_id] = {"name": archivo["name"], "modifiedTime": modified_time}
 
         self._guardar_estado(estado)
