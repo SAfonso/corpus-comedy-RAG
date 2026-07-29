@@ -332,3 +332,93 @@ def test_descargar_documento_usa_storage_from_bucket_download(monkeypatch):
     contenido = store.descargar_documento("silver-teoria", "local_legacy/hash1/doc.md")
 
     assert contenido == b"contenido del documento"
+
+
+# ---------------------------------------------------------------------------
+# listar_documentos_vigentes (task 62) — selección "vigente" que consume
+# `scripts/validate_corpus.py`: una fila por clave de linaje
+# (`origen_hash_md5`), la de `created_at` más reciente por grupo. Mismo
+# patrón de doble sin red que `listar_documentos_pendientes` de arriba.
+# ---------------------------------------------------------------------------
+
+
+def test_listar_documentos_vigentes_se_queda_con_la_mas_reciente_por_linaje(monkeypatch):
+    """Dos filas con el mismo `origen_hash_md5` (dos renderizados del mismo
+    original) -> solo sobrevive la de `created_at` mayor."""
+    monkeypatch.delenv("SUPABASE_SCHEMA_MODE", raising=False)
+    fila_antigua = {
+        "id": "doc-1-v1",
+        "origen_hash_md5": "origen-hash-A",
+        "hash_md5": "hash-md-viejo",
+        "created_at": "2026-01-01T00:00:00.000000+00:00",
+    }
+    fila_reciente = {
+        "id": "doc-1-v2",
+        "origen_hash_md5": "origen-hash-A",
+        "hash_md5": "hash-md-nuevo",
+        "created_at": "2026-07-01T00:00:00.000000+00:00",
+    }
+    client = _FakeClientSilver(
+        datos_por_tabla={"teoria_documentos": [fila_antigua, fila_reciente]}
+    )
+    store = TeoriaStore(client=client)
+
+    vigentes = store.listar_documentos_vigentes()
+
+    assert vigentes == [fila_reciente]
+
+
+def test_listar_documentos_vigentes_una_fila_por_cada_clave_de_linaje_distinta(monkeypatch):
+    """Dos documentos de origen distinto (`origen_hash_md5` distinto) ->
+    ambas filas son vigentes, ninguna se descarta."""
+    monkeypatch.delenv("SUPABASE_SCHEMA_MODE", raising=False)
+    fila_doc_a = {
+        "id": "doc-a",
+        "origen_hash_md5": "origen-hash-A",
+        "hash_md5": "hash-a",
+        "created_at": "2026-01-01T00:00:00.000000+00:00",
+    }
+    fila_doc_b = {
+        "id": "doc-b",
+        "origen_hash_md5": "origen-hash-B",
+        "hash_md5": "hash-b",
+        "created_at": "2026-01-02T00:00:00.000000+00:00",
+    }
+    client = _FakeClientSilver(datos_por_tabla={"teoria_documentos": [fila_doc_a, fila_doc_b]})
+    store = TeoriaStore(client=client)
+
+    vigentes = store.listar_documentos_vigentes()
+
+    assert {fila["id"] for fila in vigentes} == {"doc-a", "doc-b"}
+
+
+def test_listar_documentos_vigentes_sin_filas_devuelve_lista_vacia(monkeypatch):
+    monkeypatch.delenv("SUPABASE_SCHEMA_MODE", raising=False)
+    client = _FakeClientSilver(datos_por_tabla={"teoria_documentos": []})
+    store = TeoriaStore(client=client)
+
+    assert store.listar_documentos_vigentes() == []
+
+
+def test_listar_documentos_vigentes_es_independiente_del_orden_de_llegada(monkeypatch):
+    """El orden en que PostgREST devuelve las filas no debe importar: la más
+    reciente por `origen_hash_md5` gana aunque llegue primero."""
+    monkeypatch.delenv("SUPABASE_SCHEMA_MODE", raising=False)
+    fila_reciente = {
+        "id": "doc-1-v2",
+        "origen_hash_md5": "origen-hash-A",
+        "hash_md5": "hash-md-nuevo",
+        "created_at": "2026-07-01T00:00:00.000000+00:00",
+    }
+    fila_antigua = {
+        "id": "doc-1-v1",
+        "origen_hash_md5": "origen-hash-A",
+        "hash_md5": "hash-md-viejo",
+        "created_at": "2026-01-01T00:00:00.000000+00:00",
+    }
+    client = _FakeClientSilver(
+        datos_por_tabla={"teoria_documentos": [fila_reciente, fila_antigua]}
+    )
+    store = TeoriaStore(client=client)
+
+    assert store.listar_documentos_vigentes() == [fila_reciente]
