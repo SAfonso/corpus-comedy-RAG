@@ -27,16 +27,20 @@ correcto funcionamiento de cada etapa ya está cubierto por sus propios tests
 unitarios; aquí se testea la ORQUESTACIÓN (marcado/reanudación), no las
 etapas en sí.
 """
+import hashlib
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from src.theory import pipeline as pipeline_mod
-from src.theory.normalizers.format_normalizer import LICENCIA_POR_DEFECTO
+from src.theory.normalizers.format_normalizer import DocumentoEntrada, LICENCIA_POR_DEFECTO
+from src.theory.normalizers.language_normalizer import FragmentoNormalizado
 from src.theory.pipeline import run_pipeline
 from src.utils.drive_sync import ArchivoSincronizado
+from src.utils.quality_scorer import score_quality
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
 SAMPLE_TXT = FIXTURES_DIR / "sample_transcript.txt"
@@ -513,12 +517,21 @@ def test_etapa_0_sync_puebla_el_staging_antes_de_que_drivemonitor_escanee(tmp_pa
 class _DocumentStoreEspia:
     """Doble de `DocumentStore`: registra cada llamada a `capturar()` (sin
     tocar red) y, opcionalmente, lanza una excepción simulada para las rutas
-    en `fallos` (mismo patrón que `_procesar_con_fallo` de arriba: fallo
-    controlado por monkeypatch/inyección, no un fixture corrupto)."""
+    en `fallos` o para toda una `capa` en `fallos_capa` (mismo patrón que
+    `_procesar_con_fallo` de arriba: fallo controlado por monkeypatch/
+    inyección, no un fixture corrupto).
 
-    def __init__(self, fallos: set = frozenset()):
+    Devuelve un `ResultadoCaptura` doble (`SimpleNamespace` con `hash_md5`
+    real del contenido leído, task 60) — el pipeline usa ese `hash_md5` para
+    poblar `origen_bronze` y, de ahí, `extra.origen_hash_md5` de la fila
+    Silver; los tests de captura Bronze anteriores a la task 60 no leen el
+    valor de retorno, así que no se ven afectados por este cambio.
+    """
+
+    def __init__(self, fallos: set = frozenset(), fallos_capa: frozenset = frozenset()):
         self.llamadas: list[dict] = []
         self._fallos = fallos
+        self._fallos_capa = fallos_capa
 
     def capturar(
         self,
@@ -531,20 +544,25 @@ class _DocumentStoreEspia:
         mime_type=None,
         extra=None,
     ):
-        self.llamadas.append(
-            {
-                "ruta": ruta,
-                "capa": capa,
-                "flujo": flujo,
-                "drive_file_id": drive_file_id,
-                "modified_time": modified_time,
-                "nombre": nombre,
-                "mime_type": mime_type,
-                "extra": extra,
-            }
-        )
-        if ruta in self._fallos:
-            raise RuntimeError(f"fallo simulado capturando {ruta}")
+        llamada = {
+            "ruta": ruta,
+            "capa": capa,
+            "flujo": flujo,
+            "drive_file_id": drive_file_id,
+            "modified_time": modified_time,
+            "nombre": nombre,
+            "mime_type": mime_type,
+            "extra": extra,
+        }
+        if capa == "silver":
+            # Silver siempre sube texto (`.md`); Bronze puede ser binario
+            # (p.ej. `.pdf`) y no se lee como texto aquí.
+            llamada["contenido"] = Path(ruta).read_text(encoding="utf-8")
+        self.llamadas.append(llamada)
+
+        if ruta in self._fallos or capa in self._fallos_capa:
+            raise RuntimeError(f"fallo simulado capturando {ruta} (capa={capa})")
+        return SimpleNamespace(hash_md5=hashlib.md5(Path(ruta).read_bytes()).hexdigest())
 
 
 def test_document_store_none_no_captura_nada_y_no_cambia_el_comportamiento(entorno):
@@ -601,8 +619,12 @@ def test_captura_bronze_modo_drive_llama_a_document_store_con_kwargs_correctos(t
     )
 
     assert resultado.ok
-    assert len(doc_store.llamadas) == 1
-    llamada = doc_store.llamadas[0]
+    # Filtra a `capa == "bronze"`: con `document_store` inyectado, este mismo
+    # doble también recibe la captura Silver (task 60) de este documento — no
+    # es lo que este test verifica (ver tests de la §Persistencia Silver).
+    llamadas_bronze = [l for l in doc_store.llamadas if l["capa"] == "bronze"]
+    assert len(llamadas_bronze) == 1
+    llamada = llamadas_bronze[0]
     assert llamada["ruta"] == staging_dir / "sample_transcript.txt"
     assert llamada["capa"] == "bronze"
     assert llamada["flujo"] == "teoria"
@@ -645,7 +667,11 @@ def test_captura_bronze_legacy_asocia_ruta_relativa_a_su_propia_carpeta_de_orige
     )
 
     assert resultado.ok
-    por_nombre = {llamada["nombre"]: llamada for llamada in doc_store.llamadas}
+    # Filtra a `capa == "bronze"`: con `document_store` inyectado, este mismo
+    # doble también recibe la captura Silver (task 60, otro `nombre` —
+    # `.md` — que colisionaría en este dict si no se filtrara).
+    llamadas_bronze = [l for l in doc_store.llamadas if l["capa"] == "bronze"]
+    por_nombre = {llamada["nombre"]: llamada for llamada in llamadas_bronze}
     assert set(por_nombre) == {"sample_transcript.txt", "sample_transcript.pdf"}
 
     llamada_txt = por_nombre["sample_transcript.txt"]
@@ -692,7 +718,11 @@ def test_fichero_bajo_staging_dir_no_se_captura_en_modo_legacy(tmp_path):
     )
 
     assert resultado.ok
-    assert doc_store.llamadas == []
+    # Ninguna captura BRONZE ocurre para este fichero (ni Drive ni legacy, ver
+    # docstring del test) — sí ocurre una captura Silver (task 60, §"caso raro
+    # sin captura Bronze en este run": recalcula el hash directamente, ver
+    # `pipeline._persistir_silver`), que no es lo que este test verifica.
+    assert [l for l in doc_store.llamadas if l["capa"] == "bronze"] == []
     assert {p.name for p in resultado.procesados} == {"sample_transcript.txt"}
 
 
@@ -721,3 +751,240 @@ def test_fallo_captura_bronze_no_tumba_el_batch_y_excluye_solo_el_fichero_fallid
     estado = json.loads(entorno["ruta_estado"].read_text())
     assert "sample_transcript.pdf" not in estado
     assert "sample_transcript.txt" in estado
+
+
+# --- Persistencia Silver, etapa 1 (task 60, P25) -----------------------------
+#
+# Contrato exacto en `src/theory/SPEC.md` §"`silver.teoria_documentos` — qué
+# añade teoría vía `extra`" y §"La fila Silver no reutiliza el par de Drive de
+# su Bronze — y por qué": con `document_store` inyectado (mismo interruptor
+# que Bronze), cada documento que sobrevive a `generar_version` con éxito se
+# vuelca TAMBIÉN a `silver.teoria_documentos`, siempre en modo legacy
+# (`drive_file_id=modified_time=None`), con el linaje hacia su Bronze de
+# origen en `extra.origen_*`. Un fallo de esa captura no tumba el batch ni
+# retira el fichero de `procesados`/`ruta_estado` (Bronze y `v{N}` ya se
+# completaron con éxito para él).
+
+
+def _llamadas_silver(doc_store: "_DocumentStoreEspia") -> list[dict]:
+    return [llamada for llamada in doc_store.llamadas if llamada["capa"] == "silver"]
+
+
+def test_persistir_silver_calcula_metadatos_correctos_de_documento_conocido(tmp_path):
+    """Unidad aislada de `_persistir_silver` (sin pasar por todo `run_pipeline`):
+    verifica que `idioma_original` (del PRIMER fragmento), `traducido` (True si
+    ALGÚN fragmento se tradujo), `num_fragmentos` y `quality_score` (misma
+    agregación que `generar_version` usa para `stats.json`) se calculan
+    correctamente de un `DocumentoEntrada` con fragmentos conocidos, y que el
+    contenido subido es exactamente el de `render_document`."""
+    fragmentos = [
+        FragmentoNormalizado(
+            texto="Este es un fragmento de ejemplo bastante largo para tener buen quality score.",
+            subtipo="explicacion",
+            idioma_original="es",
+            idioma_fragmento="es",
+            traducido=False,
+        ),
+        FragmentoNormalizado(
+            texto="This is another fragment, originally in English, later translated to Spanish.",
+            subtipo="ejemplo",
+            idioma_original="en",
+            idioma_fragmento="es",
+            traducido=True,
+        ),
+    ]
+    documento = DocumentoEntrada(
+        fragmentos=fragmentos,
+        fuente="Fuente De Prueba",
+        tipo_fuente="teoria",
+        autor=None,
+        licencia=LICENCIA_POR_DEFECTO,
+    )
+
+    path_original = tmp_path / "original.pdf"
+    path_original.write_bytes(b"contenido binario original de prueba")
+    hash_original = hashlib.md5(path_original.read_bytes()).hexdigest()
+
+    doc_store = _DocumentStoreEspia()
+    origen_bronze = {path_original: (hash_original, None, None)}
+
+    pipeline_mod._persistir_silver(doc_store, path_original, documento, origen_bronze)
+
+    assert len(doc_store.llamadas) == 1
+    llamada = doc_store.llamadas[0]
+    assert llamada["capa"] == "silver"
+    assert llamada["flujo"] == "teoria"
+    assert llamada["drive_file_id"] is None
+    assert llamada["modified_time"] is None
+    assert llamada["nombre"] == "fuente-de-prueba.md"
+    assert llamada["mime_type"] == "text/markdown"
+    # El temporal se limpia al salir del `with` — ya no existe tras la llamada.
+    assert not Path(llamada["ruta"]).exists()
+
+    from src.theory.normalizers.format_normalizer import render_document
+
+    esperado_contenido = render_document(
+        fragmentos, fuente="Fuente De Prueba", tipo_fuente="teoria", autor=None,
+        licencia=LICENCIA_POR_DEFECTO,
+    )
+    assert llamada["contenido"] == esperado_contenido
+
+    extra = llamada["extra"]
+    assert extra["origen_hash_md5"] == hash_original
+    assert extra["origen_drive_file_id"] is None
+    assert extra["origen_modified_time"] is None
+    assert extra["fuente"] == "Fuente De Prueba"
+    assert extra["autor"] is None
+    assert extra["tipo_fuente"] == "teoria"
+    assert extra["licencia"] == LICENCIA_POR_DEFECTO
+    assert extra["idioma_original"] == "es"  # del PRIMER fragmento, no el segundo (en)
+    assert extra["traducido"] is True  # al menos un fragmento (el segundo) se tradujo
+    assert extra["num_fragmentos"] == 2
+
+    esperado_quality = (score_quality(fragmentos[0].texto) + score_quality(fragmentos[1].texto)) / 2
+    assert extra["quality_score"] == pytest.approx(esperado_quality)
+
+
+def test_persistencia_silver_legacy_sube_un_md_por_documento_con_linaje_correcto(entorno):
+    """Extremo a extremo (modo legacy, `carpeta_books` con dos ficheros): cada
+    documento que llega a `v{N}` con éxito genera UNA captura Silver, siempre
+    con `drive_file_id=modified_time=None`, y `extra.origen_hash_md5` es el
+    `hash_md5` del ORIGINAL (no el del `.md`)."""
+    carpeta = entorno["carpetas"][0]
+    txt_original = carpeta / "sample_transcript.txt"
+    pdf_original = carpeta / "sample_transcript.pdf"
+    doc_store = _DocumentStoreEspia()
+
+    resultado = _run(entorno, document_store=doc_store)
+
+    assert resultado.ok
+    silver_llamadas = _llamadas_silver(doc_store)
+    assert len(silver_llamadas) == 2
+
+    por_tipo = {llamada["extra"]["tipo_fuente"]: llamada for llamada in silver_llamadas}
+    assert set(por_tipo) == {"transcripcion_curso", "teoria"}
+
+    llamada_txt = por_tipo["transcripcion_curso"]
+    assert llamada_txt["capa"] == "silver"
+    assert llamada_txt["flujo"] == "teoria"
+    assert llamada_txt["drive_file_id"] is None
+    assert llamada_txt["modified_time"] is None
+    assert llamada_txt["nombre"] == "sample-transcript.md"
+    assert llamada_txt["mime_type"] == "text/markdown"
+    assert llamada_txt["extra"]["origen_hash_md5"] == hashlib.md5(
+        txt_original.read_bytes()
+    ).hexdigest()
+    assert llamada_txt["extra"]["origen_drive_file_id"] is None
+    assert llamada_txt["extra"]["origen_modified_time"] is None
+    assert llamada_txt["extra"]["licencia"] == LICENCIA_POR_DEFECTO
+
+    llamada_pdf = por_tipo["teoria"]
+    assert llamada_pdf["extra"]["origen_hash_md5"] == hashlib.md5(
+        pdf_original.read_bytes()
+    ).hexdigest()
+    assert llamada_pdf["extra"]["origen_drive_file_id"] is None
+    assert llamada_pdf["extra"]["origen_modified_time"] is None
+
+    # No afecta al resto del pipeline: v{N} y el marcado siguen igual.
+    assert resultado.version_dir == entorno["directorio_procesado"] / "v1"
+    assert {p.name for p in resultado.procesados} == {
+        "sample_transcript.txt",
+        "sample_transcript.pdf",
+    }
+
+
+def test_persistencia_silver_modo_drive_usa_el_linaje_drive_en_extra(tmp_path):
+    """Cuando el original viene de Drive, `extra.origen_drive_file_id`/
+    `extra.origen_modified_time` de la fila Silver son los de ESE Bronze —
+    aun cuando la propia fila Silver se escribe en modo legacy
+    (`drive_file_id=modified_time=None` en la llamada de captura)."""
+
+    class _DriveSyncConArchivo:
+        def __init__(self, staging_dir: Path):
+            self.staging_dir = staging_dir
+
+        def sync_con_metadata(self) -> list[ArchivoSincronizado]:
+            self.staging_dir.mkdir(parents=True, exist_ok=True)
+            destino = self.staging_dir / "sample_transcript.txt"
+            shutil.copy(SAMPLE_TXT, destino)
+            return [
+                ArchivoSincronizado(
+                    path=destino,
+                    file_id="drive-file-456",
+                    name="sample_transcript.txt",
+                    modified_time="2026-07-29T11:00:00.000Z",
+                    mime_type="application/vnd.google-apps.document",
+                    mime_salida="text/plain",
+                )
+            ]
+
+    staging_dir = tmp_path / "staging"
+    fake_drive = _DriveSyncConArchivo(staging_dir)
+    doc_store = _DocumentStoreEspia()
+
+    resultado = run_pipeline(
+        None,
+        directorio_procesado=tmp_path / "processed",
+        ruta_estado=tmp_path / "state" / "processed_files.json",
+        traductor=_traductor_fake,
+        drive_sync=fake_drive,
+        document_store=doc_store,
+    )
+
+    assert resultado.ok
+    silver_llamadas = _llamadas_silver(doc_store)
+    assert len(silver_llamadas) == 1
+    llamada = silver_llamadas[0]
+
+    # La fila Silver en sí sigue en modo legacy (decisión task 51).
+    assert llamada["drive_file_id"] is None
+    assert llamada["modified_time"] is None
+
+    extra = llamada["extra"]
+    assert extra["origen_drive_file_id"] == "drive-file-456"
+    assert extra["origen_modified_time"] == "2026-07-29T11:00:00.000Z"
+    assert extra["origen_hash_md5"] == hashlib.md5(
+        (staging_dir / "sample_transcript.txt").read_bytes()
+    ).hexdigest()
+
+
+def test_fallo_captura_silver_no_impide_marcar_el_fichero_como_procesado(entorno):
+    """Decisión de esta task (documentada también en `pipeline.py` §"Etapa 1:
+    persistencia Silver"): a diferencia de un fallo de captura Bronze, un
+    fallo de captura Silver NO retira el fichero de `procesados` ni de
+    `ruta_estado` — Bronze y `v{N}` ya se completaron con éxito para él, así
+    que el siguiente run no debe reprocesarlo desde cero. Sí se registra en
+    `fallidos`."""
+    doc_store = _DocumentStoreEspia(fallos_capa={"silver"})
+
+    resultado = _run(entorno, document_store=doc_store)
+
+    assert not resultado.ok  # hay fallos (los de la captura Silver)
+    assert {p.name for p in resultado.procesados} == {
+        "sample_transcript.txt",
+        "sample_transcript.pdf",
+    }
+    assert len(resultado.fallidos) == 2
+    assert all("captura Silver fallida" in f.error for f in resultado.fallidos)
+
+    estado = json.loads(entorno["ruta_estado"].read_text())
+    assert set(estado.keys()) == {"sample_transcript.txt", "sample_transcript.pdf"}
+
+    # v{N} se generó con éxito para ambos, pese a que Silver falló para ambos.
+    assert resultado.version_dir == entorno["directorio_procesado"] / "v1"
+    manifest = json.loads((resultado.version_dir / "manifest.json").read_text())
+    assert len(manifest["documents"]) == 2
+
+
+def test_document_store_none_no_persiste_silver_tampoco(entorno):
+    """Regresión explícita (además de `test_document_store_none_no_cambia_el_
+    comportamiento`, que ya cubre Bronze): `document_store=None` deja también
+    la persistencia Silver completamente desactivada — nada que capturar, sin
+    doble ni llamada que verificar más allá de que el pipeline termine ok."""
+    resultado = _run(entorno, document_store=None)
+
+    assert resultado.ok
+    assert {p.name for p in resultado.procesados} == {
+        "sample_transcript.txt",
+        "sample_transcript.pdf",
+    }
