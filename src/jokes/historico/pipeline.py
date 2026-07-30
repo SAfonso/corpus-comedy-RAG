@@ -10,6 +10,7 @@ Supabase:
     DriveSource.sync_con_metadata() -> [.docx staged + metadata Drive]
       -> document_store.capturar(capa="bronze") -> bronze.historico_documentos (0b, task 64)
       -> marcar_remates.procesar_docx() -> [.md marcado]
+      -> document_store.capturar(capa="silver") -> silver.historico_documentos (1b, task 65)
       -> Loader.load() -> [documento .md]
       -> segmentar_documento() -> [ChisteSegmentado, ...]  (1 por [REMATE])
       -> estructurar_chiste() (Silver)
@@ -186,11 +187,13 @@ class ResultadoHistorico:
     - `documentos`: un `ResultadoDocumento` por cada `.md` que el Loader dio
       como pendiente (nuevo/modificado). Los que `ok` completaron; los que no,
       llevan `error` y se reintentan.
-    - `marcado_fallidos`: `.docx` que fallaron la etapa 0b (captura Bronze) o
-      la etapa 1 (marcado por color) — ambas se reportan aquí, mismo criterio
-      "no aborta el batch" (ver `sincronizar_y_marcar`, §"Punto de enganche
-      exacto" de `SPEC.md`). Un `.docx` que falla 0b no llega a intentar 1 (no
-      llegó a producir `.md`).
+    - `marcado_fallidos`: `.docx` que fallaron la etapa 0b (captura Bronze),
+      la etapa 1 (marcado por color) o la etapa 1b (captura Silver) — las tres
+      se reportan aquí, mismo criterio "no aborta el batch" (ver
+      `sincronizar_y_marcar`, §"Punto de enganche exacto" de `SPEC.md`). Un
+      `.docx` que falla 0b no llega a intentar 1 (no llegó a producir `.md`);
+      uno que falla 1 no llega a intentar 1b. Un fallo de 1b no deshace el
+      `.md` ya escrito en disco: el Loader lo sigue viendo con normalidad.
     """
 
     descargados: list[str] = field(default_factory=list)
@@ -219,10 +222,11 @@ class ResultadoHistorico:
 
 
 # ---------------------------------------------------------------------------
-# Etapas 0 -> 0b -> 1 — DriveSource -> captura Bronze -> marcar_remates.
+# Etapas 0 -> 0b -> 1 -> 1b — DriveSource -> captura Bronze -> marcar_remates
+# -> captura Silver.
 #
 # ÚNICA implementación de esta secuencia (`SPEC.md` §"Punto de enganche
-# exacto: una sola implementación, dos llamadores", task 64): la usan tanto
+# exacto: una sola implementación, dos llamadores", task 64/65): la usan tanto
 # `run_historico_pipeline` (el run real, más abajo) como
 # `scripts/run_historico.py:_documentos_pendientes_para_gate` (que la corre
 # ANTES, para materializar `documentos` y evaluar el gate de coste sin
@@ -245,7 +249,8 @@ def sincronizar_y_marcar(
     document_store: Optional[Any] = None,
     procesar_docx_fn: Callable[..., tuple] = procesar_docx,
 ) -> tuple[list[Path], list[FalloMarcado]]:
-    """Etapas 0 (DriveSource) -> 0b (captura Bronze) -> 1 (marcar_remates).
+    """Etapas 0 (DriveSource) -> 0b (captura Bronze) -> 1 (marcar_remates) ->
+    1b (captura Silver).
 
     Por cada `ArchivoSincronizado` que devuelve `drive_source.sync_con_metadata()`:
     1. Captura el `.docx` en Bronze vía `document_store.capturar(...)`
@@ -257,19 +262,39 @@ def sincronizar_y_marcar(
        reporta como fallido y se salta al siguiente (mismo criterio "guarda
        primero, procesa después" del Bronze de Telegram, P22): si el original
        no quedó a salvo, no tiene sentido gastar en marcarlo.
+    3. Solo si 1 terminó bien (no lanzó), captura el `.md` resultante en
+       Silver vía `document_store.capturar(...)` (`SPEC.md` §"1b. Captura
+       Silver"), con el **mismo** par `(drive_file_id, modified_time)` que su
+       Bronze — así referencia su Bronze de origen sin FK (`SPEC.md`
+       §"Cómo referencia Silver a su Bronze"). `n_remates`/`n_chistoides` se
+       cuentan con `str.count("[REMATE]")`/`str.count("[CHISTOIDE]")` sobre
+       el **contenido del `.md` en disco** — nunca sobre el mensaje de texto
+       que devuelve `procesar_docx_fn` (`SPEC.md` §"Columnas propias de este
+       flujo", tabla de `silver.historico_documentos`: ese mensaje es para un
+       humano, no es contrato).
 
-    Un fallo en 0b o en 1 se reporta como un `FalloMarcado` (mismo dataclass
-    para las dos etapas — ambas son, de cara al operador, "este `.docx` no
-    llegó a producir su `.md`") y NO aborta el batch: se continúa con el
-    siguiente `.docx` sincronizado.
+    Un fallo en 0b, en 1 o en 1b se reporta como un `FalloMarcado` (mismo
+    dataclass para las tres etapas — todas son, de cara al operador, "este
+    `.docx` no completó su captura/marcado") y NO aborta el batch: se
+    continúa con el siguiente `.docx` sincronizado. Un fallo de 1b en
+    concreto (la captura Silver en sí) NO deshace ni afecta al `.md` ya
+    escrito en disco por el paso 2 — el `Loader` lo sigue viendo con
+    normalidad en la etapa 2 (`SPEC.md` §"El Loader no lee del bucket": la
+    persistencia Silver es "además", nunca condición para que el `.md` esté
+    disponible aguas abajo). Esta decisión (reportar sin abortar, sin revertir
+    el `.md`) no está fijada palabra por palabra en la spec para el caso
+    concreto de que 1b falle en sí misma; se deriva por analogía directa de
+    §"Fallos de captura" ("se reportan por documento ... y no abortan el
+    batch — mismo criterio que ya rige para los fallos de marcado") aplicado
+    también a la captura Silver.
 
     Devuelve `(docx_staged, marcado_fallidos)`:
     - `docx_staged`: paths locales de TODOS los `.docx` que
       `sync_con_metadata()` devolvió en este run (nuevos/modificados),
       capturados/marcados con éxito o no — mismo contrato que el `sync()`
       original (`list[Path]`), para no romper `ResultadoHistorico.descargados`.
-    - `marcado_fallidos`: un `FalloMarcado` por cada `.docx` que falló en 0b o
-      en 1.
+    - `marcado_fallidos`: un `FalloMarcado` por cada `.docx` que falló en 0b,
+      en 1 o en 1b.
 
     `document_store`: objeto con `.capturar(...)` (interfaz de
     `DocumentStore`, `src/utils/document_store.py`). Si es `None`, se
@@ -314,9 +339,34 @@ def sincronizar_y_marcar(
             continue  # 0b falló: no se marca este fichero (§0b, ver docstring)
 
         try:
-            procesar_docx_fn(a.path, carpeta_md)
+            ruta_md, _mensaje = procesar_docx_fn(a.path, carpeta_md)
         except Exception as exc:  # noqa: BLE001 — round-trip fallido u otro
             marcado_fallidos.append(FalloMarcado(docx=nombre_docx, error=str(exc)))
+            continue  # 1 falló: no hay .md que capturar en Silver
+
+        # Etapa 1b — captura Silver (task 65). `ruta_md` es el mismo Path que
+        # acaba de escribir `procesar_docx_fn`; el par de idempotencia es el
+        # de su Bronze (mismo `.docx`), no uno nuevo.
+        try:
+            ruta_md = Path(ruta_md)
+            texto_md = ruta_md.read_text(encoding="utf-8")
+            document_store.capturar(
+                ruta=ruta_md,
+                capa="silver",
+                flujo="historico",
+                drive_file_id=a.file_id,
+                modified_time=a.modified_time,
+                nombre=ruta_md.name,
+                mime_type="text/markdown",
+                extra={
+                    "n_remates": texto_md.count("[REMATE]"),
+                    "n_chistoides": texto_md.count("[CHISTOIDE]"),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 — captura Silver fallida
+            marcado_fallidos.append(
+                FalloMarcado(docx=nombre_docx, error=f"captura Silver falló: {exc}")
+            )
 
     return docx_staged, marcado_fallidos
 
