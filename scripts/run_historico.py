@@ -17,29 +17,34 @@ de este repo.
 
 `estimar_y_evaluar` (task 26) necesita `documentos: list[{"name", "content"}]`
 — la MISMA forma que devuelve `Loader.load()` — pero esa lista solo existe
-DESPUÉS de las etapas 0-2 (`DriveSource.sync()` -> `marcar_remates.procesar_docx`
--> `Loader.load()`), que hoy viven DENTRO de `run_historico_pipeline` (task 27,
-que no se modifica: es de otra tarea ya cerrada). Este script ejecuta él mismo
-esas tres etapas previas (`_documentos_pendientes_para_gate`) para poder
-evaluar el gate ANTES de decidir si merece la pena correr el resto de la
-cadena (Segmentador/Silver/taxonomía/reconciliación/Supabase, que sí son
-caras). Si el gate permite y no hay `--dry-run`, se invoca
-`run_historico_pipeline`, que VUELVE a ejecutar esas mismas tres etapas por
-dentro.
+DESPUÉS de las etapas 0->0b->1->2 (`DriveSource.sync_con_metadata()` ->
+captura Bronze -> `marcar_remates.procesar_docx` -> `Loader.load()`), que hoy
+viven DENTRO de `run_historico_pipeline` (task 27). Este script ejecuta él
+mismo esas etapas previas (`_documentos_pendientes_para_gate`, delegando 0/0b/1
+en `sincronizar_y_marcar`, `src/jokes/historico/pipeline.py`, task 64 — la
+MISMA función que usa `run_historico_pipeline` por dentro, ver su docstring
+§"Punto de enganche exacto") para poder evaluar el gate ANTES de decidir si
+merece la pena correr el resto de la cadena (Segmentador/Silver/taxonomía/
+reconciliación/Supabase, que sí son caras). Si el gate permite y no hay
+`--dry-run`, se invoca `run_historico_pipeline`, que VUELVE a ejecutar esas
+mismas etapas por dentro (vía la misma `sincronizar_y_marcar`).
 
 Dos precauciones para que esa doble pasada sea realmente inofensiva (no solo
 "trabajo repetido en local", sino sin efectos secundarios que rompan el run
 real):
 
-1. **Se reutiliza la MISMA instancia de `drive_source`** (nunca se construye
-   una segunda) entre el paso de gate y la llamada a `run_historico_pipeline`.
-   Así el segundo `.sync()` (interno a `run_historico_pipeline`) ve el estado
-   de Drive ya comprometido por el primero y no repite descargas ni pierde de
-   vista qué `.docx` hay que reintentar si `marcar_remates` falló en el paso
-   de gate (ver punto 2) — evita además una segunda ronda de llamadas a la
-   API de Drive con una instancia distinta que podría (en teoría) divergir en
-   `staging_dir`/credenciales si algún día un caller pasara valores distintos
-   por error.
+1. **Se reutilizan las MISMAS instancias de `drive_source` y `document_store`**
+   (nunca se construye una segunda de cada) entre el paso de gate y la llamada
+   a `run_historico_pipeline`. Así el segundo `sync_con_metadata()` (interno a
+   `run_historico_pipeline`, vía `sincronizar_y_marcar`) ve el estado de Drive
+   ya comprometido por el primero y no repite descargas, capturas Bronze ni
+   pierde de vista qué `.docx` hay que reintentar si la captura o
+   `marcar_remates` fallaron en el paso de gate (ver punto 2) — evita además
+   una segunda ronda de llamadas a la API de Drive/Supabase con instancias
+   distintas que podrían (en teoría) divergir en `staging_dir`/credenciales si
+   algún día un caller pasara valores distintos por error. En la práctica,
+   `sincronizar_y_marcar` ni siquiera vuelve a tocar `document_store` en esa
+   segunda pasada: `sync_con_metadata()` ya devuelve vacío.
 2. **El estado del `Loader` (`loader_state_path`) se revierte tras leerlo**
    en el paso de gate (`_documentos_pendientes_para_gate`), exactamente el
    mismo truco de "escritura prematura + revert" que ya usa
@@ -66,11 +71,11 @@ itera sobre ellos — el `.md` ya escrito en el paso de gate se queda tal cual
 en `carpeta_md`, que es caché reconstruible, no material sagrado) y `Loader`
 ve el mismo hueco pendiente que ya vio el gate.
 
-**Fallos de marcado (`marcar_remates`) detectados durante el paso de gate**
-(`marcado_fallidos_gate`) por tanto NO reaparecen en
+**Fallos de captura Bronze (0b) o de marcado (`marcar_remates`, 1) detectados
+durante el paso de gate** (`marcado_fallidos_gate`) por tanto NO reaparecen en
 `resultado.marcado_fallidos` de la llamada real a `run_historico_pipeline`
-(ese `.docx` ya no vuelve a "stagearse" en el segundo `.sync()`, así que su
-bucle de marcado ni se ejecuta sobre él) — este script los combina en el
+(ese `.docx` ya no vuelve a "stagearse" en el segundo `sync_con_metadata()`,
+así que `sincronizar_y_marcar` ni siquiera itera sobre él) — este script los combina en el
 resumen final (`marcado_fallidos_gate` + `pipeline.marcado_fallidos`) para no
 perder visibilidad, y los cuenta como fallo (exit 1) cuando se ejecuta el run
 real (ver §Semántica de exit codes). En un `--dry-run` NO cuentan para el
@@ -148,18 +153,26 @@ Este script SIEMPRE necesita acceso a Drive (vía `crear_drive_source_fn`,
 `GOOGLE_APPLICATION_CREDENTIALS` por defecto) porque el gate necesita
 contenido real de documentos — a diferencia de `--ingest` en
 `scripts/run_pipeline.py`, aquí no hay forma de evaluar el gate sin
-sincronizar Drive primero. Las credenciales de Supabase
-(`SUPABASE_URL`/`SUPABASE_SERVICE_KEY`) solo hacen falta si el gate permite y
-no hay `--dry-run` (`run_historico_pipeline` construye su propio `SupabaseStore`
-perezosamente).
+sincronizar Drive primero.
+
+Desde la task 64, también necesita **siempre** credenciales de Supabase
+(`SUPABASE_URL`/`SUPABASE_SERVICE_KEY`, vía `crear_document_store_fn`) para la
+captura Bronze (etapa 0b) — a diferencia del `store` de routing (chistes),
+que sigue construyéndose perezosamente dentro de `run_historico_pipeline` y
+solo hace falta si el gate permite el run real. `document_store` se construye
+ANTES de saber si hay algo que capturar (mismo criterio eager que
+`drive_source`), así que es necesario incluso en `--dry-run`: la captura
+Bronze ocurre en el paso de gate, no después (`SPEC.md`, "La captura ocurre
+también en `--dry-run`").
 
 ## Tests
 
 `tests/unit/scripts/test_run_historico_cli.py` inyecta `run_historico_pipeline_fn`,
-`estimar_y_evaluar_fn`, `crear_drive_source_fn` y `procesar_docx_fn` de
-mentira (mismo patrón que `test_run_pipeline_cli.py`) — nunca red real. Un
-caso usa el fixture real `tests/fixtures/Freskito-Informático.docx` con
-`marcar_remates.procesar_docx` REAL (puro, sin red) para verificar que
+`estimar_y_evaluar_fn`, `crear_drive_source_fn`, `crear_document_store_fn` y
+`procesar_docx_fn` de mentira (mismo patrón que `test_run_pipeline_cli.py`) —
+nunca red real. Un caso usa el fixture real
+`tests/fixtures/Freskito-Informático.docx` con `marcar_remates.procesar_docx`
+REAL (puro, sin red) para verificar que
 `documentos` llega al gate con el marcado `[REMATE]` real.
 """
 from __future__ import annotations
@@ -191,6 +204,7 @@ from src.jokes.historico.pipeline import (  # noqa: E402
     FalloMarcado,
     ResultadoHistorico,
     run_historico_pipeline,
+    sincronizar_y_marcar,
 )
 
 
@@ -223,6 +237,24 @@ def _crear_drive_source_por_defecto(
     )
 
 
+def _crear_document_store_por_defecto() -> Any:
+    """Construye un `DocumentStore` real (captura Bronze, etapa 0b, task 64).
+
+    Import perezoso, mismo patrón que `_crear_drive_source_por_defecto`: no
+    exige `supabase-py`/credenciales en tests que inyectan
+    `crear_document_store_fn`. Se invoca de forma EAGER en `main()` (igual que
+    `crear_drive_source_fn`), antes de saber si `sync_con_metadata()` va a
+    devolver algo — por eso requiere `SUPABASE_URL`/`SUPABASE_SERVICE_KEY`
+    para CUALQUIER invocación del CLI (incluido `--dry-run`), no solo cuando
+    el gate permite el run real: la captura ocurre en el paso de gate, no
+    después (`SPEC.md`, "La captura ocurre también en --dry-run"). Es una
+    ampliación deliberada de las credenciales que este script siempre
+    necesita — ver docstring del módulo, §Credenciales."""
+    from src.utils.document_store import DocumentStore
+
+    return DocumentStore()
+
+
 # ---------------------------------------------------------------------------
 # Estado del Loader — JSON `{name: {"md5": ...}}`, mismo contrato que
 # `Loader`/`historico/pipeline.py`. Reimplementado aquí (no importado, son
@@ -245,10 +277,12 @@ def _guardar_estado_loader(ruta_estado: Path, estado: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Etapas 0-2 (DriveSource -> marcar_remates -> Loader), ejecutadas por este
-# script para poder materializar `documentos` ANTES del gate (ver docstring
-# del módulo, §El reto de diseño). Revierte la escritura prematura del
-# `Loader` para no interferir con la llamada real a `run_historico_pipeline`.
+# Etapas 0->0b->1->2 (DriveSource -> captura Bronze -> marcar_remates ->
+# Loader), ejecutadas por este script para poder materializar `documentos`
+# ANTES del gate (ver docstring del módulo, §El reto de diseño). Etapas
+# 0/0b/1 delegan en `sincronizar_y_marcar` (única implementación, task 64).
+# Revierte la escritura prematura del `Loader` para no interferir con la
+# llamada real a `run_historico_pipeline`.
 # ---------------------------------------------------------------------------
 
 
@@ -257,9 +291,18 @@ def _documentos_pendientes_para_gate(
     carpeta_md: Path,
     loader_state_path: Path,
     *,
+    document_store: Any,
     procesar_docx_fn: Callable[..., tuple] = procesar_docx,
 ) -> tuple[list[dict], list[FalloMarcado]]:
-    """Ejecuta las etapas 0-2 del Flujo C y devuelve `(documentos, marcado_fallidos)`.
+    """Ejecuta las etapas 0->0b->1 y 2 del Flujo C y devuelve
+    `(documentos, marcado_fallidos)`.
+
+    Etapas 0 (DriveSource) -> 0b (captura Bronze) -> 1 (marcar_remates) viven
+    en `sincronizar_y_marcar` (`src/jokes/historico/pipeline.py`, task 64) —
+    la MISMA función que usa `run_historico_pipeline` por dentro (ver
+    docstring del módulo, §El reto de diseño y §"Punto de enganche exacto" de
+    `SPEC.md`): esta es la pasada que sincroniza y captura de verdad en el uso
+    real por CLI.
 
     `documentos` tiene la forma que consume `estimar_y_evaluar`
     (`list[{"name", "content"}]`). El estado del `Loader` se revierte tras
@@ -269,14 +312,12 @@ def _documentos_pendientes_para_gate(
     """
     carpeta_md.mkdir(parents=True, exist_ok=True)
 
-    docx_staged = drive_source.sync()
-
-    marcado_fallidos: list[FalloMarcado] = []
-    for docx in docx_staged:
-        try:
-            procesar_docx_fn(docx, carpeta_md)
-        except Exception as exc:  # noqa: BLE001 — round-trip fallido u otro
-            marcado_fallidos.append(FalloMarcado(docx=Path(docx).name, error=str(exc)))
+    _, marcado_fallidos = sincronizar_y_marcar(
+        drive_source,
+        carpeta_md,
+        document_store=document_store,
+        procesar_docx_fn=procesar_docx_fn,
+    )
 
     estado_previo = _cargar_estado_loader(loader_state_path)
     loader = Loader(folder=carpeta_md, state_path=loader_state_path)
@@ -480,12 +521,13 @@ def main(
     run_historico_pipeline_fn: Callable[..., ResultadoHistorico] = run_historico_pipeline,
     estimar_y_evaluar_fn: Callable[..., DecisionGate] = estimar_y_evaluar,
     crear_drive_source_fn: Callable[..., Any] = _crear_drive_source_por_defecto,
+    crear_document_store_fn: Callable[[], Any] = _crear_document_store_por_defecto,
     procesar_docx_fn: Callable[..., tuple] = procesar_docx,
 ) -> int:
     """Entrada del CLI. `run_historico_pipeline_fn`/`estimar_y_evaluar_fn`/
-    `crear_drive_source_fn`/`procesar_docx_fn` son inyectables (ver
-    `tests/unit/scripts/test_run_historico_cli.py`); en producción son los
-    componentes reales del Flujo C."""
+    `crear_drive_source_fn`/`crear_document_store_fn`/`procesar_docx_fn` son
+    inyectables (ver `tests/unit/scripts/test_run_historico_cli.py`); en
+    producción son los componentes reales del Flujo C."""
     parser = _construir_parser()
     args = parser.parse_args(argv)
 
@@ -495,7 +537,7 @@ def main(
     drive_state_path = args.drive_state if args.drive_state is not None else DRIVE_STATE_POR_DEFECTO
     loader_state_path = args.loader_state if args.loader_state is not None else LOADER_STATE_POR_DEFECTO
 
-    # --- Construcción de drive_source + etapas 0-2 (gate) ---
+    # --- Construcción de drive_source/document_store + etapas 0->0b->1->2 (gate) ---
     try:
         drive_source = crear_drive_source_fn(
             folder_id=folder_id,
@@ -503,10 +545,12 @@ def main(
             state_path=drive_state_path,
             credentials_path=args.credentials_path,
         )
+        document_store = crear_document_store_fn()
         documentos, marcado_fallidos_gate = _documentos_pendientes_para_gate(
             drive_source,
             carpeta_md,
             loader_state_path,
+            document_store=document_store,
             procesar_docx_fn=procesar_docx_fn,
         )
         decision = estimar_y_evaluar_fn(
@@ -536,13 +580,16 @@ def main(
         _emitir_resumen(resumen, args.summary_out)
         return 0
 
-    # --- Gate permitido y sin --dry-run: run real (reutiliza drive_source ya
-    # sincronizado, ver docstring del módulo, §El reto de diseño, punto 1) ---
+    # --- Gate permitido y sin --dry-run: run real (reutiliza drive_source y
+    # document_store ya construidos, ver docstring del módulo, §El reto de
+    # diseño, punto 1 — sincronizar_y_marcar() ve sync_con_metadata() vacío
+    # en esta segunda pasada, así que ni siquiera necesita document_store) ---
     try:
         resultado = run_historico_pipeline_fn(
             carpeta_md=carpeta_md,
             loader_state_path=loader_state_path,
             drive_source=drive_source,
+            document_store=document_store,
         )
     except Exception as exc:  # noqa: BLE001
         print(f"run_historico_pipeline: fallo fatal: {exc}", file=sys.stderr)

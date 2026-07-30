@@ -23,15 +23,19 @@ from pathlib import Path
 
 import pytest
 
+from src.jokes.historico.drive_source import MIME_DOCX
 from src.jokes.historico.pipeline import (
     ChisteRuteado,
+    FalloMarcado,
     ResultadoHistorico,
     run_historico_pipeline,
+    sincronizar_y_marcar,
 )
 from src.jokes.historico.segmentador import ChisteSegmentado
 from src.jokes.reconciliacion import ResultadoReconciliacion
 from src.jokes.silver import ChisteEstructurado
 from src.jokes.taxonomias import ResultadoTaxonomia
+from src.utils.drive_sync import ArchivoSincronizado
 
 FIXTURES = Path(__file__).resolve().parents[4] / "tests" / "fixtures"
 FIXTURE_MD = FIXTURES / "Freskito-Informático.md"
@@ -44,15 +48,66 @@ FIXTURE_MD_CONTENT = FIXTURE_MD.read_text(encoding="utf-8")
 # ---------------------------------------------------------------------------
 
 class FakeDriveSource:
-    """`.sync() -> list[Path]`. Devuelve una lista fija de paths."""
+    """`.sync_con_metadata() -> list[ArchivoSincronizado]`. Devuelve metadata
+    sintética fija (`file_id`/`modified_time`) para cada path — la captura
+    Bronze (task 64) necesita esa metadata, que el antiguo `.sync()` (aún
+    disponible aquí como envoltorio, por compatibilidad de interfaz) ya no
+    basta para entregar."""
 
     def __init__(self, paths):
         self._paths = list(paths)
         self.sync_calls = 0
 
-    def sync(self):
+    def sync_con_metadata(self):
         self.sync_calls += 1
-        return list(self._paths)
+        return [
+            ArchivoSincronizado(
+                path=Path(p),
+                file_id=f"file-{i}",
+                name=Path(p).name,
+                modified_time=f"2026-07-01T00:00:0{i}.000Z",
+                mime_type=MIME_DOCX,
+                mime_salida=MIME_DOCX,
+            )
+            for i, p in enumerate(self._paths)
+        ]
+
+    def sync(self):
+        return [a.path for a in self.sync_con_metadata()]
+
+
+class FakeDocumentStore:
+    """Doble de `DocumentStore` (task 64) — registra las capturas y puede
+    simular el fallo de la captura Bronze para un `.docx` concreto (por
+    `nombre`, ver §"0b. Captura Bronze" de la SPEC)."""
+
+    def __init__(self, fallar_en=None):
+        self.capturas = []
+        self._fallar_en = set(fallar_en or [])
+
+    def capturar(
+        self, *, ruta, capa, flujo, drive_file_id, modified_time, nombre, mime_type, extra=None
+    ):
+        if nombre in self._fallar_en:
+            raise RuntimeError(f"captura Bronze simulada fallando para {nombre}")
+        self.capturas.append(
+            {
+                "ruta": Path(ruta),
+                "capa": capa,
+                "flujo": flujo,
+                "drive_file_id": drive_file_id,
+                "modified_time": modified_time,
+                "nombre": nombre,
+                "mime_type": mime_type,
+                "extra": dict(extra or {}),
+            }
+        )
+        return _ResultadoCapturaFake(ya_existia=False)
+
+
+class _ResultadoCapturaFake:
+    def __init__(self, *, ya_existia):
+        self.ya_existia = ya_existia
 
 
 class FakeStore:
@@ -192,6 +247,7 @@ def loader_state(tmp_path):
 def _correr(carpeta_md, loader_state, **kwargs):
     """Helper: run con defaults de test (drive vacío salvo override)."""
     kwargs.setdefault("drive_source", FakeDriveSource([]))
+    kwargs.setdefault("document_store", FakeDocumentStore())
     kwargs.setdefault("carpeta_md", carpeta_md)
     kwargs.setdefault("loader_state_path", loader_state)
     kwargs.setdefault("estructurar_fn", _estructurar_fn)
@@ -439,11 +495,13 @@ class TestCadenaCompletaDesdeDocx:
         # DriveSource devuelve el .docx real; marcar_remates (real, puro)
         # produce el .md; Loader (real) lo carga; el resto son dobles.
         store = FakeStore()
+        document_store = FakeDocumentStore()
         res = run_historico_pipeline(
             drive_source=FakeDriveSource([FIXTURE_DOCX]),
             carpeta_md=carpeta_md,
             loader_state_path=loader_state,
             store=store,
+            document_store=document_store,
             segmentar_fn=_segmentar_fn_factory(["chiste real"]),
             estructurar_fn=_estructurar_fn,
             resolver_taxonomia_fn=_resolver_taxonomia_match,
@@ -457,6 +515,12 @@ class TestCadenaCompletaDesdeDocx:
         assert res.descargados == ["Freskito-Informático.docx"]
         assert res.procesados == ["Freskito-Informático.md"]
         assert len(store.creados) == 1
+        # Captura Bronze (0b) ocurrió ANTES del marcado (1), para este .docx.
+        assert len(document_store.capturas) == 1
+        captura = document_store.capturas[0]
+        assert captura["capa"] == "bronze" and captura["flujo"] == "historico"
+        assert captura["nombre"] == "Freskito-Informático.docx"
+        assert captura["extra"] == {"mime_origen": MIME_DOCX}
 
     def test_fallo_de_marcado_se_reporta_sin_abortar(self, carpeta_md, loader_state):
         store = FakeStore()
@@ -469,6 +533,7 @@ class TestCadenaCompletaDesdeDocx:
             carpeta_md=carpeta_md,
             loader_state_path=loader_state,
             store=store,
+            document_store=FakeDocumentStore(),
             procesar_docx_fn=procesar_docx_explota,
             segmentar_fn=_segmentar_fn_factory(["x"]),
             estructurar_fn=_estructurar_fn,
@@ -480,6 +545,115 @@ class TestCadenaCompletaDesdeDocx:
         assert not res.ok
         # No se produjo .md, así que no hay documentos procesados.
         assert res.documentos == []
+
+
+# ---------------------------------------------------------------------------
+# Captura Bronze (0b) — `sincronizar_y_marcar`, task 64. Ejercitada
+# directamente (sin pasar por el resto del pipeline) para aislar el
+# comportamiento de la única implementación de la secuencia 0->0b->1.
+# ---------------------------------------------------------------------------
+
+class TestCapturaBronze:
+    def test_captura_bronze_ocurre_antes_del_marcado(self, carpeta_md):
+        """(a) La secuencia por fichero es 0b (captura) -> 1 (marcado), en
+        ese orden — no al revés."""
+        eventos = []
+
+        def procesar_docx_espia(docx, carpeta_salida):
+            eventos.append(("marcado", Path(docx).name))
+            return Path(carpeta_salida) / (Path(docx).stem + ".md"), "OK"
+
+        class DocumentStoreEspia(FakeDocumentStore):
+            def capturar(self, **kwargs):
+                eventos.append(("captura", kwargs["nombre"]))
+                return super().capturar(**kwargs)
+
+        drive = FakeDriveSource([Path("a.docx")])
+        sincronizar_y_marcar(
+            drive, carpeta_md,
+            document_store=DocumentStoreEspia(),
+            procesar_docx_fn=procesar_docx_espia,
+        )
+        assert eventos == [("captura", "a.docx"), ("marcado", "a.docx")]
+
+    def test_captura_bronze_fallida_no_llama_a_marcar_remates(self, carpeta_md):
+        """(b) Si 0b falla para un fichero, NO se llama a procesar_docx para
+        ESE fichero (SPEC.md §"0b. Captura Bronze": "Antes de marcar_remates,
+        no después") — y se reporta como FalloMarcado, sin abortar el resto
+        del batch."""
+        llamadas_marcado = []
+
+        def procesar_docx_espia(docx, carpeta_salida):
+            llamadas_marcado.append(Path(docx).name)
+            return Path(carpeta_salida) / (Path(docx).stem + ".md"), "OK"
+
+        drive = FakeDriveSource([Path("roto.docx"), Path("ok.docx")])
+        docx_staged, fallidos = sincronizar_y_marcar(
+            drive, carpeta_md,
+            document_store=FakeDocumentStore(fallar_en={"roto.docx"}),
+            procesar_docx_fn=procesar_docx_espia,
+        )
+
+        # El fichero cuya captura falló nunca llega a marcar_remates...
+        assert "roto.docx" not in llamadas_marcado
+        # ...pero el batch continúa: el siguiente fichero SÍ se marca.
+        assert llamadas_marcado == ["ok.docx"]
+        assert [f.docx for f in fallidos] == ["roto.docx"]
+        assert "captura Bronze" in fallidos[0].error
+        # docx_staged sigue reportando TODOS los sincronizados (éxito o no).
+        assert {Path(p).name for p in docx_staged} == {"roto.docx", "ok.docx"}
+
+    def test_run_historico_y_run_historico_pipeline_usan_la_misma_funcion(self):
+        """(c) Regresión explícita: ambos llamadores (el run real y el paso
+        de gate de `scripts/run_historico.py`) delegan en la MISMA función —
+        no hay una segunda implementación de la secuencia 0->0b->1 (SPEC.md
+        §"Punto de enganche exacto: una sola implementación, dos
+        llamadores")."""
+        import scripts.run_historico as cli
+        from src.jokes.historico import pipeline as pipeline_mod
+
+        assert cli.sincronizar_y_marcar is pipeline_mod.sincronizar_y_marcar
+
+    def test_idempotencia_segunda_pasada_no_revienta(self, carpeta_md):
+        """(d) Una segunda pasada sobre el mismo fichero (p.ej. capturar()
+        devolviendo ya_existia=True) no lanza ni rompe el marcado — la
+        idempotencia de la captura es independiente de la de marcar_remates
+        (SPEC.md §"Idempotencia en capas")."""
+
+        class DocumentStoreYaExistia(FakeDocumentStore):
+            def capturar(self, **kwargs):
+                super().capturar(**kwargs)  # registra igualmente
+                return _ResultadoCapturaFake(ya_existia=True)
+
+        llamadas_marcado = []
+
+        def procesar_docx_espia(docx, carpeta_salida):
+            llamadas_marcado.append(Path(docx).name)
+            return Path(carpeta_salida) / (Path(docx).stem + ".md"), "OK"
+
+        drive = FakeDriveSource([Path("repetido.docx")])
+        store = DocumentStoreYaExistia()
+
+        docx_staged_1, fallidos_1 = sincronizar_y_marcar(
+            drive, carpeta_md, document_store=store, procesar_docx_fn=procesar_docx_espia,
+        )
+        docx_staged_2, fallidos_2 = sincronizar_y_marcar(
+            drive, carpeta_md, document_store=store, procesar_docx_fn=procesar_docx_espia,
+        )
+
+        assert fallidos_1 == [] and fallidos_2 == []
+        assert llamadas_marcado == ["repetido.docx", "repetido.docx"]
+        assert len(store.capturas) == 2  # capturar() se invocó las dos veces, sin excepción
+
+    def test_sin_archivos_no_construye_document_store_real(self, carpeta_md):
+        """No exige credenciales de Supabase cuando no hay nada que
+        capturar: `document_store=None` con `sync_con_metadata()` vacío no
+        intenta construir un `DocumentStore` real (que fallaría sin
+        SUPABASE_URL/SUPABASE_SERVICE_KEY en este entorno de test)."""
+        drive = FakeDriveSource([])
+        docx_staged, fallidos = sincronizar_y_marcar(drive, carpeta_md, document_store=None)
+        assert docx_staged == []
+        assert fallidos == []
 
 
 # ---------------------------------------------------------------------------
