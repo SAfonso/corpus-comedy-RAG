@@ -64,3 +64,25 @@ compose up -d --force-recreate`, `deploy/README.md` §6.3/§7) requiere
 ejecutar comandos en esa máquina.
 **Qué hace falta:** el usuario ejecuta el redeploy él mismo, o da acceso SSH
 al VPS para esta sesión.
+
+## Ejecutar `scripts/run_historico.py` contra el Drive real del histórico (task 67)
+
+**Fecha:** 2026-07-30
+**Por qué falla:** dos capas de la misma causa. (1) En local,
+`GOOGLE_APPLICATION_CREDENTIALS=./secrets/google-service-account.json` (`.env`)
+apunta a un fichero que no existe en este entorno — `secrets/` ni siquiera
+está creado. (2) El workflow `run_historico_semanal.yml` (`workflow_dispatch`
+con input `dry_run`, pensado exactamente para este caso) tampoco sirve de
+alternativa: `gh secret list` solo devuelve `SSH_HOST`/`SSH_PORT`/
+`SSH_PRIVATE_KEY`/`SSH_USER` (los del deploy al VPS) — ninguno de los
+secrets que ese workflow espera (`GOOGLE_SERVICE_ACCOUNT_JSON`,
+`DRIVE_FOLDER_ID_HISTORICO`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`,
+`LLM_API_KEY`, `LLM_MODEL`, `EMBEDDINGS_API_KEY`, `EMBEDDINGS_MODEL`, las tres
+del gate de coste) está configurado en el repo de GitHub todavía — el cron
+semanal (sábados 03:00 UTC) nunca ha corrido con éxito por lo mismo.
+**Qué hace falta:** el usuario, o bien (a) pega el JSON completo de la cuenta
+de servicio de Google en `secrets/google-service-account.json` local (fichero
+gitignored) para correr `run_historico.py` en esta sesión, o bien (b) da de
+alta los secrets que lista arriba en Settings → Secrets and variables →
+Actions del repo de GitHub, para que tanto el cron semanal como un
+`workflow_dispatch` manual funcionen sin intervención local.
