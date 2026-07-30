@@ -7,7 +7,8 @@ con su propia responsabilidad y sus propios tests unitarios — este módulo NO
 reimplementa ninguna etapa, solo las conecta y decide el routing final a
 Supabase:
 
-    DriveSource.sync() -> [.docx staged]
+    DriveSource.sync_con_metadata() -> [.docx staged + metadata Drive]
+      -> document_store.capturar(capa="bronze") -> bronze.historico_documentos (0b, task 64)
       -> marcar_remates.procesar_docx() -> [.md marcado]
       -> Loader.load() -> [documento .md]
       -> segmentar_documento() -> [ChisteSegmentado, ...]  (1 por [REMATE])
@@ -181,12 +182,15 @@ class ResultadoHistorico:
     """Resultado agregado de una llamada a `run_historico_pipeline`.
 
     - `descargados`: nombres de los `.docx` nuevos/modificados que
-      `DriveSource.sync()` bajó a staging en este run.
+      `DriveSource.sync_con_metadata()` bajó a staging en este run.
     - `documentos`: un `ResultadoDocumento` por cada `.md` que el Loader dio
       como pendiente (nuevo/modificado). Los que `ok` completaron; los que no,
       llevan `error` y se reintentan.
-    - `marcado_fallidos`: `.docx` que fallaron el marcado por color (no
-      llegaron a producir `.md`).
+    - `marcado_fallidos`: `.docx` que fallaron la etapa 0b (captura Bronze) o
+      la etapa 1 (marcado por color) — ambas se reportan aquí, mismo criterio
+      "no aborta el batch" (ver `sincronizar_y_marcar`, §"Punto de enganche
+      exacto" de `SPEC.md`). Un `.docx` que falla 0b no llega a intentar 1 (no
+      llegó a producir `.md`).
     """
 
     descargados: list[str] = field(default_factory=list)
@@ -212,6 +216,109 @@ class ResultadoHistorico:
     def ok(self) -> bool:
         """True si no hubo ningún fallo (documento ni marcado)."""
         return not self.fallidos and not self.marcado_fallidos
+
+
+# ---------------------------------------------------------------------------
+# Etapas 0 -> 0b -> 1 — DriveSource -> captura Bronze -> marcar_remates.
+#
+# ÚNICA implementación de esta secuencia (`SPEC.md` §"Punto de enganche
+# exacto: una sola implementación, dos llamadores", task 64): la usan tanto
+# `run_historico_pipeline` (el run real, más abajo) como
+# `scripts/run_historico.py:_documentos_pendientes_para_gate` (que la corre
+# ANTES, para materializar `documentos` y evaluar el gate de coste sin
+# gastar). En el uso real por CLI, solo la pasada del gate sincroniza de
+# verdad — `DriveSource` ya comprometió el `modifiedTime` para cuando
+# `run_historico_pipeline` vuelve a llamar a esta función, así que su
+# `sync_con_metadata()` devuelve lista vacía y no repite descarga, captura ni
+# marcado (ver docstring de `scripts/run_historico.py`, §"El reto de diseño").
+# Que ambos llamadores importen y usen literalmente esta función (no una
+# copia) es lo que impide que la captura Bronze quede enganchada solo en la
+# rama que en producción nunca sincroniza nada (ver `SPEC.md`, "Trampa que la
+# task 64 no puede pasar por alto").
+# ---------------------------------------------------------------------------
+
+
+def sincronizar_y_marcar(
+    drive_source: Any,
+    carpeta_md: Path,
+    *,
+    document_store: Optional[Any] = None,
+    procesar_docx_fn: Callable[..., tuple] = procesar_docx,
+) -> tuple[list[Path], list[FalloMarcado]]:
+    """Etapas 0 (DriveSource) -> 0b (captura Bronze) -> 1 (marcar_remates).
+
+    Por cada `ArchivoSincronizado` que devuelve `drive_source.sync_con_metadata()`:
+    1. Captura el `.docx` en Bronze vía `document_store.capturar(...)`
+       (`SPEC.md` §"0b. Captura Bronze"), con las columnas propias de este
+       flujo en `extra` (`mime_origen` = MIME de origen en Drive, distinto de
+       `mime_type` = `mime_salida`, siempre DOCX).
+    2. Solo si 0b terminó bien, `procesar_docx_fn(a.path, carpeta_md)` (etapa
+       1, marcado por color). Si 0b falla, este `.docx` NO se marca — se
+       reporta como fallido y se salta al siguiente (mismo criterio "guarda
+       primero, procesa después" del Bronze de Telegram, P22): si el original
+       no quedó a salvo, no tiene sentido gastar en marcarlo.
+
+    Un fallo en 0b o en 1 se reporta como un `FalloMarcado` (mismo dataclass
+    para las dos etapas — ambas son, de cara al operador, "este `.docx` no
+    llegó a producir su `.md`") y NO aborta el batch: se continúa con el
+    siguiente `.docx` sincronizado.
+
+    Devuelve `(docx_staged, marcado_fallidos)`:
+    - `docx_staged`: paths locales de TODOS los `.docx` que
+      `sync_con_metadata()` devolvió en este run (nuevos/modificados),
+      capturados/marcados con éxito o no — mismo contrato que el `sync()`
+      original (`list[Path]`), para no romper `ResultadoHistorico.descargados`.
+    - `marcado_fallidos`: un `FalloMarcado` por cada `.docx` que falló en 0b o
+      en 1.
+
+    `document_store`: objeto con `.capturar(...)` (interfaz de
+    `DocumentStore`, `src/utils/document_store.py`). Si es `None`, se
+    construye un `DocumentStore()` real perezosamente — pero SOLO si hay algo
+    que capturar (`archivos` no vacío): así una carpeta de Drive sin cambios
+    no exige credenciales de Supabase que no van a usarse. Idempotente por
+    `(drive_file_id, modified_time)`: una segunda pasada sobre el mismo
+    fichero (p.ej. si alguien invoca `run_historico_pipeline` directamente
+    tras el paso del gate) no sube ni inserta de nuevo (`ya_existia=True`),
+    y sigue marcando con normalidad (la idempotencia de `marcar_remates` es
+    una capa independiente, ver `SPEC.md` §"Idempotencia en capas").
+    """
+    archivos = drive_source.sync_con_metadata()
+    docx_staged = [a.path for a in archivos]
+
+    if not archivos:
+        return docx_staged, []
+
+    if document_store is None:
+        from src.utils.document_store import DocumentStore
+
+        document_store = DocumentStore()
+
+    marcado_fallidos: list[FalloMarcado] = []
+    for a in archivos:
+        nombre_docx = Path(a.path).name
+        try:
+            document_store.capturar(
+                ruta=a.path,
+                capa="bronze",
+                flujo="historico",
+                drive_file_id=a.file_id,
+                modified_time=a.modified_time,
+                nombre=a.name,
+                mime_type=a.mime_salida,
+                extra={"mime_origen": a.mime_type},
+            )
+        except Exception as exc:  # noqa: BLE001 — captura Bronze fallida
+            marcado_fallidos.append(
+                FalloMarcado(docx=nombre_docx, error=f"captura Bronze falló: {exc}")
+            )
+            continue  # 0b falló: no se marca este fichero (§0b, ver docstring)
+
+        try:
+            procesar_docx_fn(a.path, carpeta_md)
+        except Exception as exc:  # noqa: BLE001 — round-trip fallido u otro
+            marcado_fallidos.append(FalloMarcado(docx=nombre_docx, error=str(exc)))
+
+    return docx_staged, marcado_fallidos
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +438,7 @@ def run_historico_pipeline(
     loader_state_path: Optional[Path] = None,
     store: Optional[Any] = None,
     drive_source: Optional[Any] = None,
+    document_store: Optional[Any] = None,
     procesar_docx_fn: Callable[..., tuple] = procesar_docx,
     segmentar_fn: Callable[..., list] = segmentar_documento,
     estructurar_fn: Callable[..., ChisteEstructurado] = estructurar_chiste,
@@ -356,6 +464,10 @@ def run_historico_pipeline(
       `drive_state_path`. En tests se inyecta un doble sin red.
     - `store`: objeto con la interfaz de `SupabaseStore`. Si es `None`, se
       construye uno real (requiere `SUPABASE_URL`/`SUPABASE_SERVICE_KEY`).
+    - `document_store`: objeto con la interfaz de `DocumentStore` (captura
+      Bronze, etapa 0b, task 64). Si es `None`, se construye uno real
+      perezosamente (ver `sincronizar_y_marcar`) — solo si hay algo que
+      capturar.
     - `procesar_docx_fn`/`segmentar_fn`/`estructurar_fn`/`resolver_taxonomia_fn`/
       `reconciliar_fn`: las etapas, inyectables (por defecto las reales). `Loader`
       y `marcar_remates` son puros (sin red) y se usan reales.
@@ -395,16 +507,16 @@ def run_historico_pipeline(
 
     resultado = ResultadoHistorico()
 
-    # --- Etapa 0: DriveSource -> .docx staged (idempotencia por metadata) ---
-    docx_staged = drive_source.sync()
+    # --- Etapas 0 -> 0b -> 1: DriveSource -> captura Bronze -> marcar_remates
+    # (única implementación, ver `sincronizar_y_marcar`, task 64) ---
+    docx_staged, marcado_fallidos = sincronizar_y_marcar(
+        drive_source,
+        carpeta_md,
+        document_store=document_store,
+        procesar_docx_fn=procesar_docx_fn,
+    )
     resultado.descargados = [Path(p).name for p in docx_staged]
-
-    # --- Etapa 1: marcar_remates -> .md marcado (por cada .docx staged) ---
-    for docx in docx_staged:
-        try:
-            procesar_docx_fn(docx, carpeta_md)
-        except Exception as exc:  # noqa: BLE001 — round-trip fallido u otro
-            resultado.marcado_fallidos.append(FalloMarcado(docx=Path(docx).name, error=str(exc)))
+    resultado.marcado_fallidos = marcado_fallidos
 
     # --- Etapa 2: Loader -> documentos .md nuevos/modificados (MD5) ---
     estado_comprometido = _cargar_estado(loader_state_path)

@@ -25,12 +25,14 @@ import pytest
 
 from scripts.run_historico import construir_resumen, main
 from src.jokes.historico.coste import DecisionGate, EstimacionCoste
+from src.jokes.historico.drive_source import MIME_DOCX
 from src.jokes.historico.pipeline import (
     ChisteRuteado,
     FalloMarcado,
     ResultadoDocumento,
     ResultadoHistorico,
 )
+from src.utils.drive_sync import ArchivoSincronizado
 
 FIXTURES = Path(__file__).resolve().parents[3] / "tests" / "fixtures"
 FIXTURE_DOCX = FIXTURES / "Freskito-Informático.docx"
@@ -42,19 +44,62 @@ FIXTURE_DOCX = FIXTURES / "Freskito-Informático.docx"
 
 
 class FakeDriveSource:
-    """`.sync() -> list[Path]`. Devuelve una lista fija de paths, una sola vez
-    (llamadas siguientes devuelven vacío — simula la idempotencia real de
-    `DriveSource.sync()` una vez el estado ya quedó comprometido)."""
+    """`.sync_con_metadata() -> list[ArchivoSincronizado]`. Devuelve metadata
+    sintética fija, una sola vez (llamadas siguientes devuelven vacío —
+    simula la idempotencia real de `DriveSource` una vez el estado ya quedó
+    comprometido). `.sync()` sigue disponible como envoltorio de compatibilidad."""
 
     def __init__(self, paths):
         self._paths = list(paths)
         self.sync_calls = 0
 
-    def sync(self):
+    def sync_con_metadata(self):
         self.sync_calls += 1
         if self.sync_calls == 1:
-            return list(self._paths)
+            return [
+                ArchivoSincronizado(
+                    path=Path(p),
+                    file_id=f"file-{i}",
+                    name=Path(p).name,
+                    modified_time=f"2026-07-01T00:00:0{i}.000Z",
+                    mime_type=MIME_DOCX,
+                    mime_salida=MIME_DOCX,
+                )
+                for i, p in enumerate(self._paths)
+            ]
         return []
+
+    def sync(self):
+        return [a.path for a in self.sync_con_metadata()]
+
+
+class FakeDocumentStore:
+    """Doble mínimo de `DocumentStore.capturar()` (task 64) — no requiere
+    credenciales de Supabase, nunca toca red."""
+
+    def __init__(self):
+        self.capturas = []
+
+    def capturar(
+        self, *, ruta, capa, flujo, drive_file_id, modified_time, nombre, mime_type, extra=None
+    ):
+        self.capturas.append({"nombre": nombre, "capa": capa, "flujo": flujo})
+        return _ResultadoCapturaFake(ya_existia=False)
+
+
+class _ResultadoCapturaFake:
+    def __init__(self, *, ya_existia):
+        self.ya_existia = ya_existia
+
+
+def _crear_document_store_fn_fake(document_store=None):
+    store = document_store if document_store is not None else FakeDocumentStore()
+
+    def _crear():
+        return store
+
+    _crear.store = store
+    return _crear
 
 
 def _crear_drive_source_fn_fake(drive_source):
@@ -132,6 +177,7 @@ def _procesar_docx_noop(docx, carpeta_salida):
 def _kwargs_base(drive_source, *, estimar_y_evaluar_fn=None, run_historico_pipeline_fn=None):
     return dict(
         crear_drive_source_fn=_crear_drive_source_fn_fake(drive_source),
+        crear_document_store_fn=_crear_document_store_fn_fake(),
         procesar_docx_fn=_procesar_docx_noop,
         estimar_y_evaluar_fn=estimar_y_evaluar_fn or _EstimarYEvaluarEspia(),
         run_historico_pipeline_fn=run_historico_pipeline_fn or _RunHistoricoPipelineEspia(),
@@ -295,6 +341,7 @@ def test_dry_run_con_marcado_fallidos_gate_sigue_dando_exit_0(tmp_path):
             str(tmp_path / "md"),
         ],
         crear_drive_source_fn=_crear_drive_source_fn_fake(drive_source),
+        crear_document_store_fn=_crear_document_store_fn_fake(),
         procesar_docx_fn=procesar_docx_explota,
         estimar_y_evaluar_fn=_EstimarYEvaluarEspia(),
         run_historico_pipeline_fn=_RunHistoricoPipelineEspia(),
@@ -356,6 +403,7 @@ def test_exit_code_1_run_real_con_marcado_fallidos_del_paso_de_gate(tmp_path):
             str(tmp_path / "md"),
         ],
         crear_drive_source_fn=_crear_drive_source_fn_fake(drive_source),
+        crear_document_store_fn=_crear_document_store_fn_fake(),
         procesar_docx_fn=procesar_docx_explota,
         estimar_y_evaluar_fn=_EstimarYEvaluarEspia(),
         run_historico_pipeline_fn=_RunHistoricoPipelineEspia(resultado=resultado_ok),
@@ -510,6 +558,7 @@ def test_folder_id_y_rutas_se_pasan_a_crear_drive_source_fn(tmp_path):
             str(tmp_path / "creds.json"),
         ],
         crear_drive_source_fn=crear_fn,
+        crear_document_store_fn=_crear_document_store_fn_fake(),
         procesar_docx_fn=_procesar_docx_noop,
         estimar_y_evaluar_fn=_EstimarYEvaluarEspia(),
         run_historico_pipeline_fn=_RunHistoricoPipelineEspia(),
@@ -573,6 +622,7 @@ def test_documentos_del_gate_usan_marcar_remates_real_sobre_fixture_real(tmp_pat
             str(tmp_path / "md"),
         ],
         crear_drive_source_fn=_crear_drive_source_fn_fake(drive_source),
+        crear_document_store_fn=_crear_document_store_fn_fake(),
         procesar_docx_fn=procesar_docx_real,
         estimar_y_evaluar_fn=estimar_espia,
         run_historico_pipeline_fn=_RunHistoricoPipelineEspia(),
