@@ -515,12 +515,19 @@ class TestCadenaCompletaDesdeDocx:
         assert res.descargados == ["Freskito-Informático.docx"]
         assert res.procesados == ["Freskito-Informático.md"]
         assert len(store.creados) == 1
-        # Captura Bronze (0b) ocurrió ANTES del marcado (1), para este .docx.
-        assert len(document_store.capturas) == 1
-        captura = document_store.capturas[0]
-        assert captura["capa"] == "bronze" and captura["flujo"] == "historico"
-        assert captura["nombre"] == "Freskito-Informático.docx"
-        assert captura["extra"] == {"mime_origen": MIME_DOCX}
+        # Captura Bronze (0b) ocurrió ANTES del marcado (1), y la captura
+        # Silver (1b) después, para este .docx -> .md.
+        assert len(document_store.capturas) == 2
+        bronze, silver = document_store.capturas
+        assert bronze["capa"] == "bronze" and bronze["flujo"] == "historico"
+        assert bronze["nombre"] == "Freskito-Informático.docx"
+        assert bronze["extra"] == {"mime_origen": MIME_DOCX}
+        assert silver["capa"] == "silver" and silver["flujo"] == "historico"
+        assert silver["nombre"] == "Freskito-Informático.md"
+        assert silver["mime_type"] == "text/markdown"
+        assert silver["drive_file_id"] == bronze["drive_file_id"]
+        assert silver["modified_time"] == bronze["modified_time"]
+        assert silver["extra"] == {"n_remates": 20, "n_chistoides": 1}
 
     def test_fallo_de_marcado_se_reporta_sin_abortar(self, carpeta_md, loader_state):
         store = FakeStore()
@@ -553,15 +560,31 @@ class TestCadenaCompletaDesdeDocx:
 # comportamiento de la única implementación de la secuencia 0->0b->1.
 # ---------------------------------------------------------------------------
 
+def _procesar_docx_espia_factory(eventos_marcado, contenido_md="cuerpo sin marcado"):
+    """`procesar_docx_fn` doble que ESCRIBE de verdad el `.md` en
+    `carpeta_salida` (task 65 lo necesita: la captura Silver lee el contenido
+    real del fichero, no puede quedarse en un `Path` que no existe)."""
+
+    def procesar_docx_espia(docx, carpeta_salida):
+        eventos_marcado.append(Path(docx).name)
+        ruta_md = Path(carpeta_salida) / (Path(docx).stem + ".md")
+        ruta_md.write_text(contenido_md, encoding="utf-8")
+        return ruta_md, "OK"
+
+    return procesar_docx_espia
+
+
 class TestCapturaBronze:
     def test_captura_bronze_ocurre_antes_del_marcado(self, carpeta_md):
-        """(a) La secuencia por fichero es 0b (captura) -> 1 (marcado), en
-        ese orden — no al revés."""
+        """(a) La secuencia por fichero es 0b (captura Bronze) -> 1 (marcado)
+        -> 1b (captura Silver), en ese orden."""
         eventos = []
 
         def procesar_docx_espia(docx, carpeta_salida):
             eventos.append(("marcado", Path(docx).name))
-            return Path(carpeta_salida) / (Path(docx).stem + ".md"), "OK"
+            ruta_md = Path(carpeta_salida) / (Path(docx).stem + ".md")
+            ruta_md.write_text("cuerpo sin marcado", encoding="utf-8")
+            return ruta_md, "OK"
 
         class DocumentStoreEspia(FakeDocumentStore):
             def capturar(self, **kwargs):
@@ -574,7 +597,11 @@ class TestCapturaBronze:
             document_store=DocumentStoreEspia(),
             procesar_docx_fn=procesar_docx_espia,
         )
-        assert eventos == [("captura", "a.docx"), ("marcado", "a.docx")]
+        assert eventos == [
+            ("captura", "a.docx"),  # 0b — Bronze
+            ("marcado", "a.docx"),  # 1 — marcar_remates
+            ("captura", "a.md"),  # 1b — Silver
+        ]
 
     def test_captura_bronze_fallida_no_llama_a_marcar_remates(self, carpeta_md):
         """(b) Si 0b falla para un fichero, NO se llama a procesar_docx para
@@ -582,10 +609,7 @@ class TestCapturaBronze:
         no después") — y se reporta como FalloMarcado, sin abortar el resto
         del batch."""
         llamadas_marcado = []
-
-        def procesar_docx_espia(docx, carpeta_salida):
-            llamadas_marcado.append(Path(docx).name)
-            return Path(carpeta_salida) / (Path(docx).stem + ".md"), "OK"
+        procesar_docx_espia = _procesar_docx_espia_factory(llamadas_marcado)
 
         drive = FakeDriveSource([Path("roto.docx"), Path("ok.docx")])
         docx_staged, fallidos = sincronizar_y_marcar(
@@ -606,7 +630,7 @@ class TestCapturaBronze:
     def test_run_historico_y_run_historico_pipeline_usan_la_misma_funcion(self):
         """(c) Regresión explícita: ambos llamadores (el run real y el paso
         de gate de `scripts/run_historico.py`) delegan en la MISMA función —
-        no hay una segunda implementación de la secuencia 0->0b->1 (SPEC.md
+        no hay una segunda implementación de la secuencia 0->0b->1->1b (SPEC.md
         §"Punto de enganche exacto: una sola implementación, dos
         llamadores")."""
         import scripts.run_historico as cli
@@ -626,10 +650,7 @@ class TestCapturaBronze:
                 return _ResultadoCapturaFake(ya_existia=True)
 
         llamadas_marcado = []
-
-        def procesar_docx_espia(docx, carpeta_salida):
-            llamadas_marcado.append(Path(docx).name)
-            return Path(carpeta_salida) / (Path(docx).stem + ".md"), "OK"
+        procesar_docx_espia = _procesar_docx_espia_factory(llamadas_marcado)
 
         drive = FakeDriveSource([Path("repetido.docx")])
         store = DocumentStoreYaExistia()
@@ -643,7 +664,8 @@ class TestCapturaBronze:
 
         assert fallidos_1 == [] and fallidos_2 == []
         assert llamadas_marcado == ["repetido.docx", "repetido.docx"]
-        assert len(store.capturas) == 2  # capturar() se invocó las dos veces, sin excepción
+        # capturar() se invocó 2 veces por pasada (Bronze + Silver) x 2 pasadas.
+        assert len(store.capturas) == 4
 
     def test_sin_archivos_no_construye_document_store_real(self, carpeta_md):
         """No exige credenciales de Supabase cuando no hay nada que
@@ -654,6 +676,158 @@ class TestCapturaBronze:
         docx_staged, fallidos = sincronizar_y_marcar(drive, carpeta_md, document_store=None)
         assert docx_staged == []
         assert fallidos == []
+
+
+# ---------------------------------------------------------------------------
+# Captura Silver (1b) — `sincronizar_y_marcar`, task 65. El `.md` que produce
+# `marcar_remates` (etapa 1), hasta ahora transitorio, se sube también a
+# `silver.historico_documentos` / bucket `silver-historico`, referenciando su
+# Bronze por el mismo par `(drive_file_id, modified_time)`.
+# ---------------------------------------------------------------------------
+
+
+class TestCapturaSilver:
+    def test_marcado_exitoso_captura_el_md_en_silver(self, carpeta_md):
+        """(a) Tras un marcado exitoso se captura el `.md` en Silver con
+        `capa="silver"`, `mime_type="text/markdown"` y el MISMO
+        `drive_file_id`/`modified_time` que la captura Bronze del mismo
+        `.docx` (SPEC.md §"Cómo referencia Silver a su Bronze")."""
+        drive = FakeDriveSource([Path("doc.docx")])
+        store = FakeDocumentStore()
+        sincronizar_y_marcar(
+            drive, carpeta_md,
+            document_store=store,
+            procesar_docx_fn=_procesar_docx_espia_factory([]),
+        )
+
+        assert [c["capa"] for c in store.capturas] == ["bronze", "silver"]
+        bronze, silver = store.capturas
+        assert silver["flujo"] == "historico"
+        assert silver["mime_type"] == "text/markdown"
+        assert silver["nombre"] == "doc.md"
+        assert silver["drive_file_id"] == bronze["drive_file_id"] == "file-0"
+        assert silver["modified_time"] == bronze["modified_time"]
+
+    def test_n_remates_y_n_chistoides_se_cuentan_sobre_el_md_real(self, carpeta_md):
+        """(b) `n_remates`/`n_chistoides` se calculan con `str.count(...)`
+        sobre el contenido REAL del `.md` en disco — usando el fixture real
+        del histórico (`Freskito-Informático.docx` -> `.md`, marcado real, sin
+        doble ni conteo inventado)."""
+        drive = FakeDriveSource([FIXTURE_DOCX])
+        store = FakeDocumentStore()
+        sincronizar_y_marcar(drive, carpeta_md, document_store=store)
+
+        silver = store.capturas[1]
+        assert silver["capa"] == "silver"
+        md_generado = carpeta_md / "Freskito-Informático.md"
+        texto_md = md_generado.read_text(encoding="utf-8")
+        assert silver["extra"] == {
+            "n_remates": texto_md.count("[REMATE]"),
+            "n_chistoides": texto_md.count("[CHISTOIDE]"),
+        }
+        # El fixture real tiene remates y chistoides de verdad (no 0/0).
+        assert silver["extra"]["n_remates"] > 0
+
+    def test_n_remates_y_n_chistoides_no_se_parsean_del_mensaje_de_procesar_docx(self, carpeta_md):
+        """(b, complemento) El segundo elemento de la tupla que devuelve
+        `procesar_docx_fn` (mensaje para humanos, p.ej. "OK - REMATE 30 chars,
+        CHISTOIDE 10 chars") NO es la fuente del recuento — aunque el mensaje
+        diga un número de caracteres totalmente distinto, el recuento sale de
+        contar literalmente `[REMATE]`/`[CHISTOIDE]` en el `.md` (SPEC.md
+        §"Columnas propias de este flujo")."""
+
+        def procesar_docx_engañoso(docx, carpeta_salida):
+            ruta_md = Path(carpeta_salida) / (Path(docx).stem + ".md")
+            ruta_md.write_text(
+                "x [REMATE]a[/REMATE] y [REMATE]b[/REMATE] z [CHISTOIDE]c[/CHISTOIDE]",
+                encoding="utf-8",
+            )
+            # Mensaje deliberadamente mentiroso sobre el recuento real.
+            return ruta_md, "OK - REMATE 999 chars, CHISTOIDE 999 chars"
+
+        drive = FakeDriveSource([Path("doc.docx")])
+        store = FakeDocumentStore()
+        sincronizar_y_marcar(
+            drive, carpeta_md, document_store=store, procesar_docx_fn=procesar_docx_engañoso,
+        )
+
+        silver = store.capturas[1]
+        assert silver["extra"] == {"n_remates": 2, "n_chistoides": 1}
+
+    def test_captura_bronze_fallida_no_intenta_captura_silver(self, carpeta_md):
+        """(c) Si la captura Bronze (0b) falla, NO se intenta la captura
+        Silver (1b) — nunca se llega a marcar_remates, así que no hay `.md`
+        que capturar."""
+        drive = FakeDriveSource([Path("roto.docx")])
+        store = FakeDocumentStore(fallar_en={"roto.docx"})
+        _, fallidos = sincronizar_y_marcar(
+            drive, carpeta_md, document_store=store,
+            procesar_docx_fn=_procesar_docx_espia_factory([]),
+        )
+
+        assert store.capturas == []  # ni Bronze (falló) ni Silver se registraron
+        assert len(fallidos) == 1
+        assert "captura Bronze" in fallidos[0].error
+
+    def test_marcado_fallido_no_intenta_captura_silver(self, carpeta_md):
+        """(d) Si `procesar_docx_fn` lanza (marcado falla, p.ej. round-trip),
+        NO se intenta la captura Silver — un Silver sin su `.md` no se crea
+        nunca (invariante de la task 68, SPEC.md §"1b. Captura Silver")."""
+
+        def procesar_docx_explota(docx, carpeta_salida):
+            raise ValueError("round-trip FALLIDO")
+
+        drive = FakeDriveSource([Path("roto.docx")])
+        store = FakeDocumentStore()
+        _, fallidos = sincronizar_y_marcar(
+            drive, carpeta_md, document_store=store, procesar_docx_fn=procesar_docx_explota,
+        )
+
+        # Solo la captura Bronze se registró — nunca hubo intento de Silver.
+        assert [c["capa"] for c in store.capturas] == ["bronze"]
+        assert len(fallidos) == 1
+        assert fallidos[0].error == "round-trip FALLIDO"
+
+    def test_fallo_de_captura_silver_se_reporta_y_no_aborta_el_batch(self, carpeta_md):
+        """(e) Decisión propia (no fijada palabra por palabra en la spec para
+        este caso concreto, ver docstring de `sincronizar_y_marcar`): si la
+        captura Silver (1b) en sí falla, se reporta como `FalloMarcado` (mismo
+        criterio que 0b/1, por analogía con SPEC.md §"Fallos de captura") y el
+        batch continúa con el siguiente `.docx` — no aborta, y el `.md` que
+        `procesar_docx_fn` ya escribió en disco sigue ahí (el Loader lo verá
+        con normalidad, aunque el orquestador completo no se ejercita aquí)."""
+
+        drive = FakeDriveSource([Path("a.docx"), Path("b.docx")])
+
+        class DocumentStoreSilverFalla(FakeDocumentStore):
+            def capturar(self, *, ruta, capa, flujo, drive_file_id, modified_time, nombre, mime_type, extra=None):
+                if capa == "silver" and nombre == "a.md":
+                    raise RuntimeError("bucket silver-historico caído")
+                return super().capturar(
+                    ruta=ruta, capa=capa, flujo=flujo, drive_file_id=drive_file_id,
+                    modified_time=modified_time, nombre=nombre, mime_type=mime_type, extra=extra,
+                )
+
+        store = DocumentStoreSilverFalla()
+        llamadas_marcado = []
+        docx_staged, fallidos = sincronizar_y_marcar(
+            drive, carpeta_md, document_store=store,
+            procesar_docx_fn=_procesar_docx_espia_factory(llamadas_marcado),
+        )
+
+        # El batch no aborta: ambos ficheros se marcaron.
+        assert llamadas_marcado == ["a.docx", "b.docx"]
+        # a.md tiene su Bronze capturado (0b ok) pero su Silver falló.
+        capas_a = [c["capa"] for c in store.capturas if c["nombre"] in ("a.docx", "a.md")]
+        assert capas_a == ["bronze"]
+        # b.docx completó las tres etapas con normalidad.
+        capas_b = [c["capa"] for c in store.capturas if c["nombre"] in ("b.docx", "b.md")]
+        assert capas_b == ["bronze", "silver"]
+        # El fallo de Silver se reportó sin abortar el resto del batch.
+        assert len(fallidos) == 1
+        assert fallidos[0].docx == "a.docx"
+        assert "captura Silver" in fallidos[0].error
+        assert {Path(p).name for p in docx_staged} == {"a.docx", "b.docx"}
 
 
 # ---------------------------------------------------------------------------
