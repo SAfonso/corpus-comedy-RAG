@@ -86,10 +86,10 @@ LLM decida):
 
 | `tipo_fuente`         | Qué es                          | Trigger             | Storage destino        | Limpieza            |
 |-----------------------|----------------------------------|----------------------|--------------------------|----------------------|
-| `teoria`              | Libros de comedia               | Batch (Drive)       | Ficheros `v{N}` + índice | Agresiva (determ.) |
-| `transcripcion_curso` | Cursos transcritos (WhisperX)   | Batch (Drive)       | Ficheros `v{N}` + índice | Agresiva (determ.) |
-| `propio`              | Chistes propios en tiempo real  | Realtime (Telegram) | Supabase               | Propia (Bronze/Silver) |
-| `propio_historico`    | Textos propios ya escritos      | Batch retroactivo   | Supabase               | Propia (Bronze/Silver) |
+| `teoria`              | Libros de comedia               | Batch (Drive)       | Supabase (Bronze/Silver/Gold, P25) | Agresiva (determ.) |
+| `transcripcion_curso` | Cursos transcritos (WhisperX)   | Batch (Drive)       | Supabase (Bronze/Silver/Gold, P25) | Agresiva (determ.) |
+| `propio`              | Chistes propios en tiempo real  | Realtime (Telegram) | Supabase (Bronze/Silver)               | Propia (Bronze/Silver) |
+| `propio_historico`    | Textos propios ya escritos      | Batch retroactivo   | Supabase (Bronze/Silver)               | Propia (Bronze/Silver) |
 
 **Contrato con el RAG:** toda unidad indexada lleva `tipo_fuente`. El RAG hace
 retrieval separado por fuente y combina en el prompt. Nunca se mezcla el origen
@@ -99,7 +99,7 @@ de forma implícita.
 - `propio*` = `{propio, propio_historico}` — comparten Silver, versionado por
   chiste y reconciliación (`src/jokes/SPEC.md`).
 - `externo*` = `{teoria, transcripcion_curso}` — comparten limpieza agresiva,
-  traducción y salida a ficheros (Flujo A).
+  traducción y persistencia en Supabase via Bronze/Silver/Gold (Flujo A, P25).
 
 **Licencia por defecto** (ver `llm-policy.md`, sin enforcement aún):
 `externo* → personal_only`, `propio* → comercializable`. `licencia` es un campo
@@ -113,9 +113,10 @@ Tres orquestadores independientes que comparten utilidades y convergen en el
 
 ```
 Flujo A — Teoría (batch, determinista)
-  DriveMonitor → Parser → SubtypeDetector → Cleaner → LanguageDetector
-    → LanguageNormalizer → QualityScorer → FormatNormalizer
-    → /data/processed/v{N}/  ──(ingesta)──▶ Supabase (índice)
+  DriveSync (opcional) → [Captura Bronze] → DriveMonitor → Parser → SubtypeDetector
+    → Cleaner → LanguageDetector → LanguageNormalizer → QualityScorer
+    → FormatNormalizer → [Persistencia Silver] → [Ingesta Gold]
+    ──▶ Supabase: bronze.teoria_documentos → silver.teoria_documentos → gold.teoria_chunks
 
 Flujo B — Chistes propios / Telegram (realtime, LLM)
   TelegramBot → Bronze(raw) → PreLimpiezaMinima → Silver(LLM)
@@ -124,7 +125,8 @@ Flujo B — Chistes propios / Telegram (realtime, LLM)
 Flujo C — Chistes históricos (batch retroactivo, LLM)
   [script marcar_remates.py: docx→.md, marcado AUTOMÁTICO por color →
      [REMATE] (rojo #FF0000) + [CHISTOIDE] (burdeos #980000)]  (automático, previo)
-  HistLoader → Segmentador([REMATE]=fin; [CHISTOIDE] no es frontera; + LLM)
+  DriveSync → [Captura Bronze] → marcar_remates.procesar_docx → [Persistencia Silver]
+    → Loader → Segmentador([REMATE]=fin; [CHISTOIDE] no es frontera; + LLM)
     → Silver(LLM) → Reconciliación → Supabase
 ```
 
@@ -137,6 +139,7 @@ src/
 │   ├── language_detector.py
 │   ├── quality_scorer.py
 │   ├── drive_sync.py       # núcleo de sync con Drive real (A y C) — P23
+│   ├── document_store.py   # captura durable Bronze/Silver a Supabase (A y C) — P25
 │   └── llm/                # cliente LLM (Silver) y embeddings
 ├── theory/                 # Flujo A — SPEC.md
 │   ├── drive_sync.py        # especialización de teoría sobre utils/drive_sync
@@ -156,10 +159,12 @@ src/
     └── supabase_store.py
 
 scripts/
-├── run_pipeline.py           # Flujo A (teoría)
-├── run_historico.py          # Flujo C (batch)
-├── marcar_remates.py         # preprocesado automático por color (ver historico/SPEC.md)
-├── validate_corpus.py
+├── run_pipeline.py                # Flujo A (teoría)
+├── run_historico.py               # Flujo C (batch)
+├── marcar_remates.py              # preprocesado automático por color (ver historico/SPEC.md)
+├── backfill_teoria_bronze.py      # captura legacy de data/raw/ a bronze.teoria_documentos (P25, task 66)
+├── reprocesar_bronze_pendiente.py # reproceso de chistes en flight tras fallo de background (Flujo B)
+├── validate_corpus.py             # validación de contenido y topología (task 62/68)
 └── stats_report.py
 
 docs/specs/
@@ -175,16 +180,19 @@ los flujos B y C porque tratan la misma unidad (`propio*`), pero no con teoría
 
 ## Idempotencia y versionado — comparativa entre flujos
 
-| Flujo            | Idempotencia                              | Versionado             | Detalle |
+| Flujo            | Idempotencia                              | Capas en Supabase     | Detalle |
 |-------------------|---------------------------------------------|--------------------------|-----------|
-| A — Teoría        | `processed_files.json` (hash MD5) + metadata de Drive en modo Drive-real (P23) | `v{N}` inmutable         | `src/theory/SPEC.md` |
-| B — Telegram      | Por evento (`telegram_update_id`)         | Por chiste                | `src/jokes/telegram/SPEC.md` |
-| C — Histórico     | Hash MD5 del documento + reconciliación de chiste | Por chiste        | `src/jokes/historico/SPEC.md` |
+| A — Teoría        | `(drive_file_id, modified_time)` en Drive-real o `hash_md5` en modo legacy (P25) | Bronze (original) → Silver (limpio) → Gold (chunks) | `src/theory/SPEC.md` |
+| B — Telegram      | Por evento (`telegram_update_id`)         | Bronze → Silver (chiste) | `src/jokes/telegram/SPEC.md` |
+| C — Histórico     | `(drive_file_id, modified_time)` en Drive o `hash_md5` legacy (P25) | Bronze (`.docx` original) → Silver (`.md` marcado) → chiste | `src/jokes/historico/SPEC.md` |
 
-- **`v{N}` inmutable aplica SOLO a teoría.** Su `manifest.json` es inmutable una
-  vez generado; nunca se sobrescribe una versión.
+- **Bronze es append-only en los tres flujos (P25).** Cada modificación detectada
+  en Drive genera una **fila nueva** (clave `(drive_file_id, modified_time)` en modo Drive o
+  `hash_md5` en modo legacy), nunca se sobrescribe ni elimina. El material original
+  queda protegido en el bucket correspondiente.
 - **Reanudación:** si cualquier flujo falla a mitad, retoma desde el último ítem
-  no completado (fichero/documento/evento), sin reprocesar lo ya hecho.
+  no completado (fichero/documento/evento), sin reprocesar lo ya hecho — cada capa
+  consulta su propia clave de idempotencia al empezar.
 
 **P19 (2026-07-24) — Flujo C lee de carpeta Drive real.** En su momento, a
 diferencia del Flujo A —cuya integración con Drive real estaba diferida sobre
