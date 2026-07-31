@@ -1,4 +1,5 @@
-"""validate_corpus — gate de validación de CONTENIDO de Flujo A (Teoría).
+"""validate_corpus — gate de validación de CONTENIDO de Flujo A (Teoría) +
+validación de TOPOLOGÍA del almacenamiento del sistema entero (task 68).
 
 Contrato (`src/theory/SPEC.md` §"`validate_corpus.py` sin `manifest.json`
 (task 62)", `CHECKPOINTS.md`): último paso antes de dar por bueno un
@@ -10,7 +11,23 @@ fuente POR DEFECTO. `generar_version`/`v{N}` no se retiran con esta task
 (scope exclusivo de la task 63): este script simplemente deja de consumirlos
 como gate por defecto.
 
-## Dos modos
+## Frontera task 62 / task 68 (`src/theory/SPEC.md` §"task 62 valida
+## contenido, task 68 valida topología")
+
+Los dos modos de abajo (Supabase, ruta local) son de CONTENIDO — de la task
+62, sin cambios de esta task. El modo nuevo, `--topologia` (task 68, ver
+`check_silver_tiene_bronze_teoria` y compañía más abajo en el módulo), es
+distinto en todo: valida la relación Bronze↔Silver↔Storage de TODAS las
+filas de los cuatro destinos fijos (`bronze`/`silver` x `teoria`/`historico`,
+`src/utils/document_store.DESTINOS`), no solo las vigentes de teoría; no lee
+ni parsea contenido de documento en ningún caso (ni `.md`, ni cabecera YAML);
+y no es un gate por commit sino una auditoría del sistema entero. `silver.chistes`
+no tiene destino propio en `DESTINOS` — no es una tabla de documentos, es la
+unidad indexable de B/C (`src/jokes/SPEC.md` §Storage) — y este script no le
+añade, reabre ni duplica ningún check de contenido: sigue fuera de su
+alcance, igual que antes de esta task.
+
+## Dos modos (contenido, task 62 — sin cambios)
 
 1. **Supabase (por defecto, sin argumento)**: construye un `TeoriaStore` real
    (credenciales de `.env` — si faltan, `TeoriaStoreError` con mensaje claro,
@@ -80,14 +97,18 @@ que no tiene equivalente en modo ruta local. Determinista, sin LLM.
 
 ## CLI
 
-    python scripts/validate_corpus.py [ruta_local]
+    python scripts/validate_corpus.py [ruta_local | --topologia]
 
-Sin argumento: modo Supabase (filas vigentes de `silver.teoria_documentos`).
-Con argumento: modo ruta local, valida los `.md` de esa ruta directamente
-(sin red, sin `TeoriaStore`, útil para testear contra un `tmp_path` con
-fixtures). Exit code 0 si todos los checks aplicables pasan, 1 si alguno
-falla o si el modo Supabase no puede ni siquiera arrancar (credenciales
-ausentes) — nunca una excepción críptica para esos casos.
+Sin argumento: modo Supabase de contenido (filas vigentes de
+`silver.teoria_documentos`). Con `ruta_local`: modo ruta local de contenido,
+valida los `.md` de esa ruta directamente (sin red, sin `TeoriaStore`, útil
+para testear contra un `tmp_path` con fixtures). Con `--topologia`: modo
+topología (task 68), construye un `DocumentStore` real y audita los cuatro
+destinos fijos. `ruta_local` y `--topologia` son mutuamente excluyentes
+(`parser.error`, exit code 2, si se dan los dos). Exit code 0 si todos los
+checks aplicables pasan, 1 si alguno falla o si el modo elegido no puede ni
+siquiera arrancar (credenciales ausentes) — nunca una excepción críptica
+para esos casos.
 """
 from __future__ import annotations
 
@@ -97,7 +118,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 # Bootstrap de sys.path: permite invocar `python scripts/validate_corpus.py`
 # sin depender de PYTHONPATH ni de que el invocador esté en la raíz del repo
@@ -109,6 +130,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from src.theory.teoria_store import TeoriaStore, TeoriaStoreError  # noqa: E402
+from src.utils.document_store import DESTINOS, DocumentStore, DocumentStoreError  # noqa: E402
 
 MIN_PALABRAS = 100
 MAX_PALABRAS = 50_000
@@ -487,6 +509,182 @@ def validar_ruta_local(directorio: Path) -> list[ResultadoCheck]:
     return [check(documentos) for check in CHECKS]
 
 
+# --- Checks de topología del almacenamiento (task 68) ------------------------
+#
+# NO son checks de contenido (eso es la task 62, arriba, intacto): validan la
+# relación entre capas y entre fila y objeto, para los CUATRO destinos fijos
+# de `document_store.DESTINOS` (bronze/silver x teoria/historico), sin
+# distinguir "vigente"/"histórico" como sí hace `check_fila_objeto_coherente`
+# — la task 68 "corre sobre el sistema entero" (`src/theory/SPEC.md` §"task
+# 62 valida contenido, task 68 valida topología"), incluidos los renderizados
+# antiguos que el modo Supabase de contenido ya no mira. Puramente
+# relacionales sobre las filas ya traídas (mismo criterio de "funciones puras
+# por check" del resto del módulo): ni parsean ni descargan contenido salvo
+# `TopologiaStore.objeto_existe`, que solo comprueba existencia (nunca hash —
+# esa comparación más fuerte, solo para Silver teoría vigente, ya la hace
+# `check_fila_objeto_coherente`, task 62; no se duplica aquí).
+#
+# El huérfano "objeto sin fila" (`src/utils/SPEC.md` §DocumentStore, orden
+# objeto→fila) es TOLERADO por diseño y no se comprueba aquí — solo el
+# inverso, "fila sin objeto", que sí es una garantía real (CLAUDE.md, capa
+# Bronze).
+
+
+def check_silver_tiene_bronze_teoria(
+    filas_bronze: list[dict], filas_silver: list[dict]
+) -> ResultadoCheck:
+    """Cada fila de `silver.teoria_documentos` referencia, por
+    `origen_hash_md5`, una fila existente en `bronze.teoria_documentos`
+    (`hash_md5`) — `src/theory/SPEC.md` §`silver.teoria_documentos`:
+    `origen_hash_md5` es "la columna de linaje que manda", la única clave que
+    existe en los dos modos (Drive y legacy) porque Silver de teoría se
+    captura SIEMPRE en modo legacy (`drive_file_id=None`), incluso cuando su
+    Bronze vino de Drive (`src/theory/pipeline.py:_persistir_silver`)."""
+    hashes_bronze = {f.get("hash_md5") for f in filas_bronze}
+    detalles = [
+        f"{f.get('object_path', '<object_path desconocido>')}: "
+        f"origen_hash_md5={f.get('origen_hash_md5')!r} no tiene fila correspondiente "
+        f"en bronze.teoria_documentos"
+        for f in filas_silver
+        if f.get("origen_hash_md5") not in hashes_bronze
+    ]
+    return ResultadoCheck("silver_tiene_bronze_teoria", not detalles, detalles)
+
+
+def check_silver_tiene_bronze_historico(
+    filas_bronze: list[dict], filas_silver: list[dict]
+) -> ResultadoCheck:
+    """Cada fila de `silver.historico_documentos` referencia, por el par
+    `(drive_file_id, modified_time)`, una fila existente en
+    `bronze.historico_documentos` — `src/jokes/historico/SPEC.md` §"Cómo
+    referencia Silver a su Bronze": el mismo par, no una FK, porque el
+    histórico no tiene modo legacy (siempre Drive, tasks 64/65)."""
+    claves_bronze = {(f.get("drive_file_id"), f.get("modified_time")) for f in filas_bronze}
+    detalles = [
+        f"{f.get('object_path', '<object_path desconocido>')}: "
+        f"(drive_file_id={f.get('drive_file_id')!r}, modified_time={f.get('modified_time')!r}) "
+        f"no tiene fila correspondiente en bronze.historico_documentos"
+        for f in filas_silver
+        if (f.get("drive_file_id"), f.get("modified_time")) not in claves_bronze
+    ]
+    return ResultadoCheck("silver_tiene_bronze_historico", not detalles, detalles)
+
+
+def check_filas_tienen_objeto(
+    filas: list[dict], existe_objeto, nombre_check: str
+) -> ResultadoCheck:
+    """Cada fila tiene su objeto correspondiente en su bucket (`fila.bucket`,
+    `fila.object_path`) — genérico, se reutiliza para los cuatro destinos
+    (bronze/silver x teoria/historico). `existe_objeto(bucket, object_path)
+    -> bool` es inyectable (`TopologiaStore.objeto_existe` en producción, un
+    `dict`/lambda en tests) para no acoplar este check a `supabase-py`."""
+    detalles = [
+        f"{f.get('object_path', '<object_path desconocido>')}: objeto no encontrado "
+        f"en bucket {f.get('bucket')!r}"
+        for f in filas
+        if not existe_objeto(f.get("bucket"), f.get("object_path"))
+    ]
+    return ResultadoCheck(nombre_check, not detalles, detalles)
+
+
+def check_claves_idempotencia_unicas(filas: list[dict], nombre_check: str) -> ResultadoCheck:
+    """Dentro de UNA tabla, no hay dos filas con la misma clave de
+    idempotencia — los mismos dos índices únicos PARCIALES de Postgres (task
+    53) que ya consulta `DocumentStore._buscar_fila_existente` antes de
+    insertar: `(drive_file_id, modified_time)` cuando `drive_file_id` no es
+    `None` (modo Drive), `hash_md5` cuando sí lo es (modo legacy). Los dos
+    espacios de claves NUNCA se mezclan entre sí (son índices distintos), así
+    que una fila Drive y una legacy jamás colisionan aunque compartan algún
+    valor por casualidad."""
+    por_par: dict[tuple, list] = {}
+    por_hash_legacy: dict[Any, list] = {}
+    for f in filas:
+        identificador = f.get("object_path", f.get("id"))
+        if f.get("drive_file_id") is not None:
+            clave = (f["drive_file_id"], f.get("modified_time"))
+            por_par.setdefault(clave, []).append(identificador)
+        else:
+            por_hash_legacy.setdefault(f.get("hash_md5"), []).append(identificador)
+
+    detalles = [
+        f"(drive_file_id, modified_time)={clave!r} duplicado en {len(ids)} filas: "
+        f"{sorted(str(i) for i in ids)}"
+        for clave, ids in por_par.items()
+        if len(ids) > 1
+    ]
+    detalles += [
+        f"hash_md5(legacy)={clave!r} duplicado en {len(ids)} filas: "
+        f"{sorted(str(i) for i in ids)}"
+        for clave, ids in por_hash_legacy.items()
+        if len(ids) > 1
+    ]
+    return ResultadoCheck(nombre_check, not detalles, detalles)
+
+
+class TopologiaStore:
+    """Capa fina de solo lectura sobre `DocumentStore` para el modo
+    `--topologia` (task 68): reutiliza su cliente/credenciales y el mapeo
+    `DESTINOS` (mismos cuatro destinos fijos que la captura), pero SOLO hace
+    `SELECT` y comprobaciones de existencia de objeto — nunca llama a
+    `.capturar()` ni a ningún método de escritura. Bronze es append-only
+    (`CLAUDE.md`); este componente ni siquiera tiene la posibilidad de
+    violarlo, igual que `DocumentStore` no expone `UPDATE`/`DELETE`.
+    """
+
+    def __init__(self, document_store: DocumentStore):
+        self._store = document_store
+
+    def filas(self, capa: str, flujo: str) -> list[dict]:
+        """Todas las filas de la tabla de `(capa, flujo)` — sin filtrar por
+        vigencia, a diferencia de `TeoriaStore.listar_documentos_vigentes`
+        (task 68 corre sobre el sistema entero, no solo lo consumible hoy)."""
+        destino = DESTINOS[(capa, flujo)]
+        resultado = (
+            self._store.client.schema(destino.schema).table(destino.tabla).select("*").execute()
+        )
+        return resultado.data or []
+
+    def objeto_existe(self, bucket: Optional[str], object_path: Optional[str]) -> bool:
+        """Existencia (no contenido): intenta descargar y descarta los bytes.
+        Mismo mecanismo que `check_fila_objeto_coherente` (task 62) para
+        detectar el 404, sin comparar hash — esta comprobación es más barata
+        y deliberadamente más débil (ver docstring de la sección)."""
+        if not bucket or not object_path:
+            return False
+        try:
+            self._store.client.storage.from_(bucket).download(object_path)
+            return True
+        except Exception:  # noqa: BLE001 — cualquier fallo de storage es "objeto ausente" aquí
+            return False
+
+
+def validar_topologia(store: "TopologiaStore") -> list[ResultadoCheck]:
+    """Modo topología (task 68): 2 checks de linaje Silver→Bronze (uno por
+    flujo) + 4 checks de fila→objeto + 4 checks de claves duplicadas (uno por
+    tabla) = 10 checks en total sobre los cuatro destinos fijos."""
+    bronze_teoria = store.filas("bronze", "teoria")
+    silver_teoria = store.filas("silver", "teoria")
+    bronze_historico = store.filas("bronze", "historico")
+    silver_historico = store.filas("silver", "historico")
+
+    return [
+        check_silver_tiene_bronze_teoria(bronze_teoria, silver_teoria),
+        check_silver_tiene_bronze_historico(bronze_historico, silver_historico),
+        check_filas_tienen_objeto(bronze_teoria, store.objeto_existe, "bronze_teoria_tiene_objeto"),
+        check_filas_tienen_objeto(silver_teoria, store.objeto_existe, "silver_teoria_tiene_objeto"),
+        check_filas_tienen_objeto(
+            bronze_historico, store.objeto_existe, "bronze_historico_tiene_objeto"
+        ),
+        check_filas_tienen_objeto(
+            silver_historico, store.objeto_existe, "silver_historico_tiene_objeto"
+        ),
+        check_claves_idempotencia_unicas(bronze_teoria, "claves_unicas_bronze_teoria"),
+        check_claves_idempotencia_unicas(silver_teoria, "claves_unicas_silver_teoria"),
+        check_claves_idempotencia_unicas(bronze_historico, "claves_unicas_bronze_historico"),
+        check_claves_idempotencia_unicas(silver_historico, "claves_unicas_silver_historico"),
+    ]
+
+
 # --- CLI ---------------------------------------------------------------------
 
 
@@ -498,13 +696,22 @@ def _imprimir_resultados(resultados: list[ResultadoCheck]) -> None:
             print(f"    - {detalle}")
 
 
-def main(argv: Optional[list] = None, *, store: Optional[TeoriaStore] = None) -> int:
+def main(
+    argv: Optional[list] = None,
+    *,
+    store: Optional[TeoriaStore] = None,
+    topologia_store: Optional["TopologiaStore"] = None,
+) -> int:
     parser = argparse.ArgumentParser(
         prog="validate_corpus.py",
         description=(
             "Valida el CONTENIDO de Flujo A: por defecto, las filas vigentes de "
             "silver.teoria_documentos + su objeto en silver-teoria (Supabase). "
-            "Gate previo a cada commit que toque el corpus (CLAUDE.md raíz)."
+            "Gate previo a cada commit que toque el corpus (CLAUDE.md raíz). "
+            "Con --topologia, valida en su lugar la topología del almacenamiento "
+            "(task 68): Silver<->Bronze, fila<->objeto y claves de idempotencia "
+            "duplicadas, para teoría e histórico — corre sobre el sistema entero, "
+            "no es un gate por commit."
         ),
     )
     parser.add_argument(
@@ -515,10 +722,40 @@ def main(argv: Optional[list] = None, *, store: Optional[TeoriaStore] = None) ->
             "Ruta explícita a un directorio con ficheros .md a validar (modo "
             "ruta local, sin red — p.ej. para testear contra un tmp_path con "
             "fixtures). Por defecto: modo Supabase, filas vigentes de "
-            "silver.teoria_documentos."
+            "silver.teoria_documentos. Mutuamente excluyente con --topologia."
+        ),
+    )
+    parser.add_argument(
+        "--topologia",
+        action="store_true",
+        help=(
+            "Modo topología del almacenamiento (task 68), en vez del modo de "
+            "contenido: cada fila Silver tiene su Bronze de origen, cada fila "
+            "tiene su objeto en Storage, y no hay claves de idempotencia "
+            "duplicadas — para bronze/silver x teoria/historico. No repite los "
+            "checks de contenido de la task 62. Mutuamente excluyente con `ruta`."
         ),
     )
     args = parser.parse_args(argv)
+
+    if args.ruta is not None and args.topologia:
+        parser.error("ruta (modo ruta local) y --topologia son mutuamente excluyentes")
+
+    if args.topologia:
+        if topologia_store is None:
+            try:
+                topologia_store = TopologiaStore(DocumentStore())
+            except DocumentStoreError as exc:
+                print(f"✗ {exc}")
+                return 1
+
+        resultados = validar_topologia(topologia_store)
+        _imprimir_resultados(resultados)
+
+        todos_ok = all(r.ok for r in resultados)
+        n_ok = sum(1 for r in resultados if r.ok)
+        print(f"\n{n_ok}/{len(resultados)} checks OK (modo topología)")
+        return 0 if todos_ok else 1
 
     if args.ruta is not None:
         directorio = Path(args.ruta)
