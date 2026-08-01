@@ -55,8 +55,8 @@ El pipeline cubre **tres flujos**, independientes en orquestación pero unidos
 por un contrato común (`tipo_fuente`) y un índice de consulta compartido:
 
 - **Flujo A — Teoría:** libros y cursos de comedia desde Google Drive (batch).
-  Limpieza determinista agresiva, traducción, salida a ficheros versionados
-  en `/data/processed/v{N}/`. Spec: `src/theory/SPEC.md`.
+  Limpieza determinista agresiva, traducción, persistencia en Supabase vía
+  Bronze/Silver/Gold (P25, sin `v{N}`). Spec: `src/theory/SPEC.md`.
 - **Flujo B — Chistes propios (Telegram):** ingesta en tiempo real, chiste a
   chiste, vía bot de Telegram. Arquitectura Bronze→Silver, estructuración por LLM.
   Spec: `src/jokes/telegram/SPEC.md` + `src/jokes/SPEC.md`.

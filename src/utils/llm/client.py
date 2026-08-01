@@ -79,6 +79,33 @@ def _resolver_credenciales(
 # Parseo de la respuesta — pura, sin red, testeable con un string fijo.
 # ---------------------------------------------------------------------------
 
+def _validar_texto_respuesta(
+    texto: Optional[str],
+    *,
+    finish_reasons: Optional[list] = None,
+    prompt_feedback: Optional[object] = None,
+) -> str:
+    """Valida que la respuesta del LLM traiga texto antes de parsearla.
+
+    `respuesta.text` del SDK `google-genai` puede ser `None` sin que la
+    llamada lance excepción propia (p.ej. `finish_reason` distinto de
+    `STOP` — bloqueo de seguridad, corte por `MAX_TOKENS`, `RECITATION`...).
+    Sin este chequeo explícito, ese caso revienta más abajo en
+    `json.loads(None)` como `TypeError: the JSON object must be str, bytes
+    or bytearray, not NoneType` — un mensaje que no dice nada del motivo
+    real. Aquí se captura como `LLMClientError` con el diagnóstico que el
+    SDK exponga (finish_reason por candidato, prompt_feedback), para que un
+    fallo real (no transitorio) sea legible sin tener que reproducirlo.
+    """
+    if texto is None:
+        raise LLMClientError(
+            "El LLM no devolvió texto (respuesta.text es None) — probable "
+            f"bloqueo de contenido u otro corte anómalo. finish_reason(s): "
+            f"{finish_reasons!r}, prompt_feedback: {prompt_feedback!r}"
+        )
+    return texto
+
+
 def _parsear_json_respuesta(texto: str) -> dict:
     """Parsea el texto de respuesta del LLM (ya pedido como JSON) a `dict`.
 
@@ -137,4 +164,12 @@ def generar_json(
             response_schema=schema,
         ),
     )
-    return _parsear_json_respuesta(respuesta.text)
+    texto = _validar_texto_respuesta(
+        respuesta.text,
+        finish_reasons=[
+            getattr(candidato, "finish_reason", None)
+            for candidato in (respuesta.candidates or [])
+        ],
+        prompt_feedback=getattr(respuesta, "prompt_feedback", None),
+    )
+    return _parsear_json_respuesta(texto)

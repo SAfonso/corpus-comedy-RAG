@@ -11,6 +11,7 @@ from src.utils.llm.client import (
     LLMClientError,
     _parsear_json_respuesta,
     _resolver_credenciales,
+    _validar_texto_respuesta,
 )
 
 
@@ -49,6 +50,29 @@ class TestResolverCredenciales:
     def test_lanza_error_si_entorno_vacio(self):
         with pytest.raises(LLMClientError):
             _resolver_credenciales(None, None, entorno={})
+
+
+class TestValidarTextoRespuesta:
+    def test_devuelve_el_texto_tal_cual_si_no_es_none(self):
+        assert _validar_texto_respuesta("hola") == "hola"
+
+    def test_lanza_llm_client_error_si_texto_es_none(self):
+        with pytest.raises(LLMClientError):
+            _validar_texto_respuesta(None)
+
+    def test_mensaje_incluye_finish_reasons_si_se_dan(self):
+        with pytest.raises(LLMClientError, match="SAFETY"):
+            _validar_texto_respuesta(None, finish_reasons=["SAFETY"])
+
+    def test_mensaje_incluye_prompt_feedback_si_se_da(self):
+        with pytest.raises(LLMClientError, match="bloqueado_por_seguridad"):
+            _validar_texto_respuesta(None, prompt_feedback="bloqueado_por_seguridad")
+
+    def test_no_lanza_si_texto_es_string_vacio(self):
+        # Cadena vacía != None: es una respuesta rara pero SÍ vino texto;
+        # se deja que _parsear_json_respuesta la rechace como JSON inválido,
+        # no se confunde con el caso "el LLM no devolvió nada".
+        assert _validar_texto_respuesta("") == ""
 
 
 class TestParsearJsonRespuesta:
